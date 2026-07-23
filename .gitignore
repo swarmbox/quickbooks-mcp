@@ -17,6 +17,14 @@ data/
 .claude/settings.local.json
 .claude/commands/CLAUDE.md
 
+# development-workflow plugin rule symlinks (machine-specific; repo-specific rules may still be committed)
+.claude/rules/autonomy-conventions.md
+.claude/rules/markdown-*.md
+
+# Local-only issue/design capture and development-workflow plugin scratch (never sent to github)
+docs/issues/
+.swarmbox/
+
 # MCP registry tokens
 .mcpregistry_*
 

@@ -6,10 +6,34 @@ This is a Model Context Protocol (MCP) server that provides Claude with access t
 
 ## Git Workflow
 
-This repo uses a branch-and-PR workflow — **never commit directly to `master`**. All changes land via pull request.
+This repo uses a branch-and-PR workflow. All changes to `master` land via pull request — the merge is a human gate. The agent drives work all the way to an open PR autonomously, then stops for the developer to review and merge.
 
-- **"commit and push"** means: branch off the latest `master`, commit, push, and open a PR to `master` with `gh pr create`. Then stop — PRs wait for review; do not auto-merge.
-- Start from an up-to-date master: `git fetch origin && git switch -c <branch> origin/master`.
+### What the agent may and may not do
+
+| Action                               | Autonomous?                              |
+| ------------------------------------ | ---------------------------------------- |
+| Commit to a work branch              | ✅ yes — no need to ask each time         |
+| Push a work branch to `origin`       | ✅ yes                                    |
+| Open a pull request (`gh pr create`) | ✅ yes                                    |
+| Commit directly to `master`          | ❌ never                                  |
+| Push to `master`                     | ❌ never                                  |
+| Merge a pull request                 | ❌ never — the developer merges manually  |
+
+There is no "merge locally and push to `master`" shortcut. The PR review/merge gate is intentional and must not be bypassed.
+
+### Three-phase handoff
+
+1. **Drive to PR (agent, autonomous).** Branch off the latest `master` (a git worktree is preferred), implement, build/verify, commit, push the work branch, and open a PR to `master` with `gh pr create` (descriptive title + body summarizing what changed and why). Then **stop** — do not merge.
+2. **Merge (developer).** The developer reviews and merges the PR manually.
+3. **Resume on merge confirmation (agent, autonomous).** Once the developer says the PR is merged, without being re-asked:
+   - Pull the merged changes into the main checkout (`git switch master && git pull`), and rebuild if applicable.
+   - Remove the git worktree (`git worktree remove <path>`).
+   - Delete the local work branch with `git branch -D <branch>` (squash merges aren't recognized as "fully merged" by `-d`).
+   - The **remote** branch is auto-deleted by GitHub's "Automatically delete head branches" setting (enabled on this repo), so no remote-deletion push is needed. Pushing any branch deletion — or anything else — to `master` stays hard-blocked/developer-only regardless.
+
+### Conventions
+
+- Start a branch from an up-to-date master: `git fetch origin && git switch -c <branch> origin/master` (or `git worktree add <path> -b <branch> origin/master`).
 - **Branch naming**: `type/short-desc` — `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`. E.g. `fix/scraper-popup`, `chore/bump-deps`.
 - Give the PR a descriptive title and a body summarizing what changed and why.
 
