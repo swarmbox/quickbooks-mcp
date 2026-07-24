@@ -2,6 +2,7 @@
 
 import QuickBooks from "node-quickbooks";
 import { getClient, clearCredentialsCache, isAuthError } from "../client/index.js";
+import { toSafeErrorText } from "../utils/index.js";
 import {
   handleGetCompanyInfo,
   handleQuery,
@@ -116,28 +117,19 @@ export async function executeTool(
       try {
         return await executeOperation();
       } catch (retryError) {
-        // If retry also fails, return that error
-        const errorMessage = typeof retryError === 'object' && retryError !== null
-          ? JSON.stringify(retryError, null, 2)
-          : String(retryError);
+        // If retry also fails, return that error. Use toSafeErrorText — a raw
+        // dump here is highest-risk: the error carries the just-used token.
         return {
-          content: [{ type: "text", text: `Error after retry: ${errorMessage}` }],
+          content: [{ type: "text", text: `Error after retry: ${toSafeErrorText(retryError)}` }],
           isError: true,
         };
       }
     }
 
-    let errorMessage: string;
-    if (error instanceof Error) {
-      errorMessage = error.message;
-    } else if (typeof error === 'object' && error !== null) {
-      // node-quickbooks often returns error objects with Fault property
-      errorMessage = JSON.stringify(error, null, 2);
-    } else {
-      errorMessage = String(error);
-    }
+    // node-quickbooks errors can carry the request config (Authorization header);
+    // toSafeErrorText emits only HTTP status + QBO Fault code/message/detail.
     return {
-      content: [{ type: "text", text: `Error: ${errorMessage}` }],
+      content: [{ type: "text", text: `Error: ${toSafeErrorText(error)}` }],
       isError: true,
     };
   }

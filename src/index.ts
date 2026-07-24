@@ -26,6 +26,8 @@ async function main() {
 }
 
 main().catch((error) => {
-  console.error("Fatal error:", error);
+  // Never dump the raw error — a QBO/axios error can carry an Authorization
+  // Bearer token in its request config (CWE-532). Print the message only.
+  console.error("Fatal error:", error instanceof Error ? error.message : String(error));
   process.exit(1);
 });

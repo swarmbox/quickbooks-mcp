@@ -87,6 +87,10 @@ Names are auto-resolved to IDs using cached lookups:
 - `department_name: "Santa Rosa"` → looks up ID from cache
 - Caches are session-scoped with TTL
 
+### QBO Error Handling (Never Leak Tokens)
+
+**(I3 / CWE-532).** Never print, log, or serialize a **raw** HTTP/axios error object on any QuickBooks-touching path — no `JSON.stringify(error)`, `console.error(error)`, `util.inspect(error)`, or raw re-throw into a print/log sink. Raw QBO errors can carry the request config, including `Authorization: Bearer <access-token>` — a live-token leak. Extract **only** the HTTP status and the QBO Fault `code`/`message`/`detail`; always strip `Authorization`, request headers, and request config. Use `toSafeErrorText` (`src/utils/safe-error.ts`), built on `extractQBErrorInfo` (`src/types/quickbooks.ts`). Reference pattern: `@swarmbox/qbo-connector`'s `toQboError`.
+
 ## Adding a New Tool
 
 Every new tool requires changes in **4 files** plus README:
