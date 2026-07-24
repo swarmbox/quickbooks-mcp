@@ -5,6 +5,8 @@
 // which produces opaque errors. This module provides just-in-time guidance
 // in error responses.
 
+import { toSafeErrorText } from '../utils/index.js';
+
 // Fields that can be used in WHERE clauses for each entity type
 const FILTERABLE_FIELDS: Record<string, string[]> = {
   Purchase: [
@@ -125,10 +127,11 @@ export function buildQueryErrorMessage(
     lines.push(FILTERABLE_FIELDS[key].join(', '));
   }
 
-  // 5. Append raw error if not already covered
+  // 5. Append a safe error summary if not already covered. Never serialize the
+  //    raw error — a QBO/axios error can carry the Authorization: Bearer token.
   if (rawError && !message && !detail) {
     lines.push('');
-    lines.push('Raw error: ' + (typeof rawError === 'string' ? rawError : JSON.stringify(rawError)));
+    lines.push('Error: ' + toSafeErrorText(rawError));
   }
 
   return lines.join('\n');
