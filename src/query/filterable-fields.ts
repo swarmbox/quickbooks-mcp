@@ -5,7 +5,7 @@
 // which produces opaque errors. This module provides just-in-time guidance
 // in error responses.
 
-import { toSafeErrorText } from '../utils/index.js';
+import { formatQboError } from "../utils/errors.js";
 
 // Fields that can be used in WHERE clauses for each entity type
 const FILTERABLE_FIELDS: Record<string, string[]> = {
@@ -36,6 +36,9 @@ const FILTERABLE_FIELDS: Record<string, string[]> = {
   Payment: [
     'TxnDate', 'MetaData.CreateTime', 'MetaData.LastUpdatedTime',
     'CustomerRef', 'TotalAmt',
+  ],
+  CreditCardPayment: [
+    'TxnDate', 'VendorRef', 'Id',
   ],
   Customer: [
     'DisplayName', 'GivenName', 'FamilyName', 'CompanyName',
@@ -127,11 +130,13 @@ export function buildQueryErrorMessage(
     lines.push(FILTERABLE_FIELDS[key].join(', '));
   }
 
-  // 5. Append a safe error summary if not already covered. Never serialize the
-  //    raw error — a QBO/axios error can carry the Authorization: Bearer token.
+  // 5. Append raw error if not already covered. formatQboError rather than
+  // JSON.stringify: the rejection reaching here is often the axios error, which
+  // references its own config and socket and would throw on a bare stringify —
+  // turning a query failure into a crash.
   if (rawError && !message && !detail) {
     lines.push('');
-    lines.push('Error: ' + toSafeErrorText(rawError));
+    lines.push(`Raw error: ${formatQboError(rawError)}`);
   }
 
   return lines.join('\n');

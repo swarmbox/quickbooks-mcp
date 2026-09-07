@@ -1,0 +1,209 @@
+# Entity Coverage
+
+What the read tools can and cannot see, and why. Derived from the [Intuit
+all-entities reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/account)
+and from `node_modules/node-quickbooks/index.js` as of v2.0.46.
+
+## Three layers of coverage
+
+A read tool can only surface a posting if **all three** hold:
+
+1. **The entity is queryable** — QBO exposes it at `/query`.
+2. **We can reach it** — either node-quickbooks wraps it, or we go through
+   `src/client/rest.ts`.
+3. **The account is explicit in the entity JSON** — there is an `*AccountRef`
+   to match against. This is the layer that cannot be fixed in our code.
+
+## Layer 2: entities node-quickbooks does not wrap
+
+node-quickbooks declares one prototype method per entity and keeps its generic
+CRUD helpers on the CommonJS `module` object rather than `module.exports`, so
+omitted entities are unreachable through the client object. Six queryable
+entities fall in that gap:
+
+| Entity | Notes |
+|---|---|
+| CreditCardPayment | Posting. Reached via raw REST; covered by `query` and `query_account_transactions`. |
+| TaxPayment | Posting. Reachable via `query`; not in the account drill-down (line shape unverified). |
+| InventoryAdjustment | Posting. Same as above. |
+| ReimburseCharge | Billable-expense link. Reachable via `query`. |
+| RecurringTransaction | A template, not a posting transaction. |
+| TaxClassification | Reference data. |
+
+`src/query/pagination.ts` resolves this automatically: `fetcherForEntity()` uses
+the wrapper method when one exists and raw REST otherwise, so `query` reaches
+every queryable entity without an allow-list to maintain.
+
+### The CreditCardPayment naming trap
+
+Three different spellings for one entity — worth knowing before adding write
+support:
+
+| Context | Spelling |
+|---|---|
+| REST path | `/v3/company/<realmID>/creditcardpayment` |
+| Query statement | `select * from creditcardpayment` |
+| **JSON wrapper key (request and response)** | **`CreditCardPaymentTxn`** |
+
+Pagination discovers the response key dynamically (first array-valued key in
+`QueryResponse`), so this costs nothing on the read path. Any future
+create/update handler must send and unwrap `CreditCardPaymentTxn`.
+
+## Layer 3: postings with no account reference — structurally invisible
+
+These cannot be recovered from entity JSON at any amount of effort, because QBO
+never puts the account in the payload:
+
+| Posting | Why it is invisible |
+|---|---|
+| A/R side of Invoice | **Invoice has no `ARAccountRef`.** Confirmed against the entity reference. |
+| A/R side of CreditMemo | Same — no `ARAccountRef`. |
+| A/R side of Payment | Same. Only `DepositToAccountRef` is exposed. |
+| Sales tax liability | Posts through `TxnTaxDetail`, which carries `TaxRateRef`, not an `AccountRef`. |
+| Item-driven COGS / inventory | Derived from the Item's configured accounts, not stated on the line. |
+
+Consequence: **`query_account_transactions` can never be complete on an A/R or
+sales-tax-liability account.** **A/P is only half fine.** `APAccountRef` is
+explicit on Bill and VendorCredit — the credit side — but **BillPayment does not
+carry it at all**, so the debit side of every bill payment is invisible. Measured
+on a live company over one month: A/P credits matched the general ledger to the
+cent, while 97.7% of A/P debits were missing.
+
+The tool now says so in its output. It used to name only Accounts Receivable —
+this document claimed Other Current Liability too, but no such branch existed —
+and naming account types at all only ever covered the gaps somebody had already
+found. Every call is now cross-checked against the General Ledger for the same
+account and period, and reports a shortfall in the figures whatever its cause.
+That is what surfaced the BillPayment gap above. For a complete figure on those accounts, use `account_period_summary`,
+which reads the General Ledger report. Reports show every posting regardless of
+whether the account appears in the entity JSON — a GL-report-backed drill-down
+is the correct long-term fix for this whole class of gap.
+
+`get_report` widens that escape hatch: 24 further QBO reports, the general
+ledger and journal among them. For the A/R question specifically —
+what is outstanding, and how old is it — `aged_receivables` and
+`aged_receivable_detail` answer directly what no entity query can reach, and
+`customer_balance_detail` breaks it down by customer. The A/P equivalents are
+there too, even though A/P is reachable by entity, because the report already
+does the aging arithmetic.
+
+## Posting entities in `query_account_transactions`
+
+| Entity | Scanned | Sides extracted |
+|---|:--:|---|
+| JournalEntry | ✅ | every line, signed by `PostingType` |
+| Purchase | ✅ | header `AccountRef` (credit) + `AccountBasedExpenseLineDetail` (debit) |
+| Deposit | ✅ | header `DepositToAccountRef` (debit) + `DepositLineDetail` (credit) |
+| SalesReceipt | ✅ | header `DepositToAccountRef` (debit) + `ItemAccountRef` (credit) |
+| Bill | ✅ | header `APAccountRef` (credit) + expense lines (debit) |
+| Invoice | ✅ | `DepositToAccountRef`/`Deposit` (debit) + income lines (credit). A/R invisible. |
+| Payment | ✅ | header `DepositToAccountRef` (debit). A/R invisible. |
+| BillPayment | ⚠️ | `CheckPayment.BankAccountRef` or `CreditCardPayment.CCAccountRef` (credit) only. **No `APAccountRef` in the payload** — the A/P debit is invisible. |
+| VendorCredit | ✅ | `APAccountRef` (debit) + expense lines (credit) |
+| Transfer | ✅ | `ToAccountRef` (debit) + `FromAccountRef` (credit) |
+| CreditMemo | ✅ | income lines (debit). A/R invisible. |
+| RefundReceipt | ✅ | `DepositToAccountRef` (credit) + income lines (debit) |
+| CreditCardPayment | ✅ | `CreditCardAccountRef` (debit) + `BankAccountRef` (credit) |
+| TaxPayment | ❌ | posting, line shape unverified |
+| InventoryAdjustment | ❌ | posting, line shape unverified |
+| Estimate, PurchaseOrder, TimeActivity | ❌ | non-posting by design |
+| RecurringTransaction | ❌ | template, not a transaction |
+
+Every call reports `coverage.scannedEntityTypes` in its report data (stdio only —
+it is static, and inline in HTTP it would be pure context cost), and warns in the
+summary when an individual entity query failed, so an incomplete drill-down is
+never presented as a complete one.
+
+### Parent accounts: the drill-down and the reports count differently
+
+This is the single most confusing disagreement between the two account tools,
+and it is the data model rather than a bug:
+
+| Tool | Backed by | Counts sub-accounts? |
+|---|---|---|
+| `account_period_summary` | General Ledger report | **Always** — rolled into the parent |
+| `query_account_transactions` | Entity reads matching `AccountRef` | Only with `include_subaccounts: true` |
+
+A parent account that holds no postings of its own — common when a card or loan
+is tracked through named sub-accounts — reports plenty of activity in
+`account_period_summary` and **zero** in the drill-down. Nothing is missing; the
+postings name the sub-account, and an entity read matches one `AccountRef`.
+
+`include_subaccounts` defaults to `false` so existing callers keep their current
+results. When the resolved account has children and they were not included, the
+summary says so and names them, so the discrepancy explains itself rather than
+looking like missing data.
+
+Sub-accounts are collected with `collectAccountTree`, which walks `ParentRef`
+transitively — QBO nests up to five levels, so checking one level down is not
+enough — and tolerates a cyclic `ParentRef` without hanging.
+
+### Throttling is a third way a result can look short
+
+Intuit throttles per realm. The drill-down queries 13 entity types and each one
+auto-paginates, so firing them all at once reliably trips the limit — and a
+throttled entity comes back empty, which reads as "no activity on this account"
+rather than "ask again". Two guards:
+
+- Entity queries run at `ENTITY_QUERY_CONCURRENCY` (4) at a time rather than all
+  at once.
+- `fetcherForEntity` wraps every page fetch in `withRetry`, which backs off with
+  jitter on 429/5xx and network errors. Validation faults (4xxx) and auth faults
+  (3xxx) are **not** retried — a malformed query fails identically every time,
+  and retrying it burns throttle budget the other queries need.
+
+If an entity still fails after retries, the summary names it explicitly. Treat
+that warning as "this result is incomplete", not as a cosmetic note.
+
+### Completeness vs. the returned window
+
+Two different things can make a result look short, and they should not be
+confused:
+
+| | Meaning | How to get the rest |
+|---|---|---|
+| **Pagination** | The period has more transactions than this window returned. | Call again with the reported `offset`. Totals in `summary` already cover the full period. |
+| **Coverage** | The posting exists but carries no account reference (A/R, sales tax) or its entity type is not scanned. | Not retrievable here at all — use `account_period_summary`. |
+
+`summary.totalDebits` / `totalCredits` / `netChange` and `transactionCount` are
+always computed over the **full** result set, never the returned window, so they
+do not shift as a caller pages. Only `transactions` and `groupedByTransaction`
+are windowed.
+
+The window defaults to the full result set in stdio (detail goes to a temp file,
+so it is free) and to `HTTP_DEFAULT_LIMIT` transactions in HTTP mode (detail goes
+inline into the model's context). Both honor an explicit `limit`.
+
+### Refunds flip the sign
+
+`Purchase.Credit === true` marks a refund or return rather than a charge. Both
+sides invert: the bank or card is **debited** and the expense account credited.
+QBO's own reports honor this, so an extractor that ignores it counts a refund as
+a second charge and the account cannot tie out to the General Ledger.
+
+Only `Purchase` carries this flag. Refunds on the sales side are their own
+entity (`RefundReceipt`), already signed correctly.
+
+### Known partial extractions
+
+Real gaps within entities that *are* scanned:
+
+- **`ItemBasedExpenseLineDetail` is ignored** on Purchase and Bill — only
+  `AccountBasedExpenseLineDetail` lines are read. Item-based expense lines are
+  invisible.
+- **SalesReceipt / Invoice / CreditMemo / RefundReceipt lines without an explicit
+  `ItemAccountRef` are skipped**, since the income account is then implied by the
+  Item.
+
+## QBO app links
+
+`src/utils/urls.ts` maps entity → QBO app route. The routes are not derivable
+from entity names (`journalentry` → `journal`, `purchase` → `expense`), so a
+mapping is only added once confirmed against a real transaction. Unmapped
+entities return `null` and callers omit the link rather than emit a guessed 404.
+
+Confirmed: journalentry, purchase, deposit, salesreceipt, bill, billpayment,
+invoice, payment, customer.
+
+Not yet confirmed (no link emitted): vendorcredit, transfer, creditmemo,
+refundreceipt, creditcardpayment.

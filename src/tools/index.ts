@@ -1,8 +1,11 @@
 // Tool registry and dispatcher with auth retry
 
 import QuickBooks from "node-quickbooks";
-import { getClient, clearCredentialsCache, isAuthError } from "../client/index.js";
-import { toSafeErrorText } from "../utils/index.js";
+import { getClient, clearCredentialsCache } from "../client/index.js";
+import { formatQboError } from "../utils/errors.js";
+import { runWithAuthRetry } from "./auth-retry.js";
+import { toolDefinitions as allToolDefinitions } from "./definitions.js";
+import { validateToolArguments, ToolArgumentError, type ToolSchema } from "./validate.js";
 import {
   handleGetCompanyInfo,
   handleQuery,
@@ -10,6 +13,9 @@ import {
   handleGetProfitLoss,
   handleGetBalanceSheet,
   handleGetTrialBalance,
+  handleGetReport,
+  handleReceivePayment,
+  handleCreateTransfer,
   handleQueryAccountTransactions,
   handleAccountPeriodSummary,
   handleCreateJournalEntry,
@@ -57,6 +63,9 @@ toolHandlers.set("list_accounts", (client, args) => handleListAccounts(client, a
 toolHandlers.set("get_profit_loss", (client, args) => handleGetProfitLoss(client, args as Parameters<typeof handleGetProfitLoss>[1]));
 toolHandlers.set("get_balance_sheet", (client, args) => handleGetBalanceSheet(client, args as Parameters<typeof handleGetBalanceSheet>[1]));
 toolHandlers.set("get_trial_balance", (client, args) => handleGetTrialBalance(client, args as Parameters<typeof handleGetTrialBalance>[1]));
+toolHandlers.set("get_report", (client, args) => handleGetReport(client, args as Parameters<typeof handleGetReport>[1]));
+toolHandlers.set("receive_payment", (client, args) => handleReceivePayment(client, args as Parameters<typeof handleReceivePayment>[1]));
+toolHandlers.set("create_transfer", (client, args) => handleCreateTransfer(client, args as Parameters<typeof handleCreateTransfer>[1]));
 toolHandlers.set("query_account_transactions", (client, args) => handleQueryAccountTransactions(client, args as Parameters<typeof handleQueryAccountTransactions>[1]));
 toolHandlers.set("account_period_summary", (client, args) => handleAccountPeriodSummary(client, args as Parameters<typeof handleAccountPeriodSummary>[1]));
 toolHandlers.set("create_journal_entry", (client, args) => handleCreateJournalEntry(client, args as Parameters<typeof handleCreateJournalEntry>[1]));
@@ -87,11 +96,30 @@ toolHandlers.set("get_customer", (client, args) => handleGetCustomer(client, arg
 toolHandlers.set("edit_customer", (client, args) => handleEditCustomer(client, args as Parameters<typeof handleEditCustomer>[1]));
 toolHandlers.set("delete_entity", (client, args) => handleDeleteEntity(client, args as Parameters<typeof handleDeleteEntity>[1]));
 
+const schemasByTool = new Map<string, ToolSchema>(
+  allToolDefinitions.map((t) => [t.name, t.inputSchema as unknown as ToolSchema])
+);
+
 // Execute tool with auth retry logic
 export async function executeTool(
   name: string,
   args: Record<string, unknown>
 ): Promise<ToolResult> {
+  // Enforce the advertised input schema before anything runs. The MCP server
+  // does not do this for us, and a silently-dropped argument is worse than a
+  // rejected call: the tool succeeds having done something else. See validate.ts.
+  try {
+    validateToolArguments(name, schemasByTool.get(name), args);
+  } catch (error) {
+    if (error instanceof ToolArgumentError) {
+      return {
+        content: [{ type: "text", text: `Invalid arguments: ${error.message}` }],
+        isError: true,
+      };
+    }
+    throw error;
+  }
+
   // Special case: qbo_authenticate doesn't need a QuickBooks client
   if (name === "qbo_authenticate") {
     return handleAuthenticate(args as { authorization_code?: string; realm_id?: string });
@@ -107,30 +135,38 @@ export async function executeTool(
     return handler(client, args);
   };
 
-  // Execute with retry on auth failure
-  try {
-    return await executeOperation();
-  } catch (error) {
-    if (isAuthError(error)) {
-      // Clear cache and retry once with fresh credentials from Secrets Manager
-      clearCredentialsCache();
-      try {
-        return await executeOperation();
-      } catch (retryError) {
-        // If retry also fails, return that error. Use toSafeErrorText — a raw
-        // dump here is highest-risk: the error carries the just-used token.
-        return {
-          content: [{ type: "text", text: `Error after retry: ${toSafeErrorText(retryError)}` }],
-          isError: true,
-        };
-      }
-    }
+  // Execute with retry on auth failure. The retry is conditional: it re-runs the
+  // whole handler, so it is only offered when the failed attempt is known not to
+  // have posted anything — see auth-retry.ts.
+  const outcome = await runWithAuthRetry(executeOperation, clearCredentialsCache);
+  if (outcome.status === "ok") return outcome.value;
 
-    // node-quickbooks errors can carry the request config (Authorization header);
-    // toSafeErrorText emits only HTTP status + QBO Fault code/message/detail.
+  // formatQboError keeps QBO's Fault code/message/detail — an axios rejection
+  // reports only "Request failed with status code 400" on its own, which says
+  // nothing about which field QBO objected to.
+  const detail = formatQboError(outcome.error);
+
+  if (outcome.retryBlockedByWrite) {
+    // The one failure a caller must not simply repeat: QuickBooks refused the
+    // credentials on a call that had already sent a write, so from here there is
+    // no way to know whether it landed. Retrying blind is how a bill gets booked
+    // twice.
     return {
-      content: [{ type: "text", text: `Error: ${toSafeErrorText(error)}` }],
+      content: [{
+        type: "text",
+        text: [
+          `Authentication error: ${detail}`,
+          "",
+          "This call had already sent a write to QuickBooks, so it was not retried automatically.",
+          "Check in QuickBooks whether the transaction was recorded before running it again.",
+        ].join("\n"),
+      }],
       isError: true,
     };
   }
+
+  return {
+    content: [{ type: "text", text: `${outcome.retried ? "Error after retry" : "Error"}: ${detail}` }],
+    isError: true,
+  };
 }

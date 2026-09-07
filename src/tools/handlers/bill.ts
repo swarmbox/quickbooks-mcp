@@ -3,18 +3,32 @@
 import QuickBooks from "node-quickbooks";
 import {
   promisify,
+  promisifyWrite,
   getAccountCache,
+  getClassCache,
   getDepartmentCache,
   getVendorCache,
   resolveVendor,
+  resolveAccountRef,
+  resolveVendorRef,
+  resolveCustomerInput,
+  toQboRef,
 } from "../../client/index.js";
-import { validateAmount, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
 
+// A bill's payee is its header VendorRef — by definition a vendor, so there is
+// no entity_type to pick. Line-level attribution is
+// AccountBasedExpenseLineDetail.CustomerRef, which only accepts a customer;
+// hence customer_name rather than entity_name here.
 interface CreateBillLine {
   account_id?: string;
   account_name?: string;
   amount: number;
   description?: string;
+  class_id?: string;
+  class_name?: string;
+  customer_name?: string;
+  customer_id?: string;
 }
 
 interface BillLineChange {
@@ -22,6 +36,10 @@ interface BillLineChange {
   account_name?: string;
   amount?: number;
   description?: string;
+  class_id?: string;
+  class_name?: string;
+  customer_name?: string;
+  customer_id?: string;
   delete?: boolean;
 }
 
@@ -52,47 +70,35 @@ export async function handleCreateBill(
   }
 
   // Get cached lookups
-  const [acctCache, deptCache, vendorCacheData] = await Promise.all([
+  const [acctCache, deptCache, vendorCacheData, classCacheData] = await Promise.all([
     getAccountCache(client),
     getDepartmentCache(client),
     getVendorCache(client),
+    getClassCache(client),
   ]);
 
-  // Resolve vendor
-  const resolveVendorRef = (nameOrId: string): { value: string; name: string } => {
-    const byId = vendorCacheData.byId.get(nameOrId);
-    if (byId) return { value: byId.Id, name: byId.DisplayName };
-
-    const byName = vendorCacheData.byName.get(nameOrId.toLowerCase());
-    if (byName) return { value: byName.Id, name: byName.DisplayName };
-
-    const byPartial = vendorCacheData.items.find(v =>
-      v.DisplayName.toLowerCase().includes(nameOrId.toLowerCase())
+  // Resolve a class (location/Class tracking) by id or name to a QBO ClassRef.
+  const resolveClassRef = (nameOrId: string): { value: string; name: string } => {
+    const byId = classCacheData.byId.get(nameOrId);
+    if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
+    const byName = classCacheData.byName.get(nameOrId.toLowerCase());
+    if (byName) return { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
+    const byPartial = classCacheData.items.find(c =>
+      (c.FullyQualifiedName || c.Name).toLowerCase().includes(nameOrId.toLowerCase())
     );
-    if (byPartial) return { value: byPartial.Id, name: byPartial.DisplayName };
-
-    throw new Error(`Vendor not found: "${nameOrId}"`);
+    if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
+    throw new Error(`Class not found: "${nameOrId}"`);
   };
 
+  // Resolve vendor
   let vendorRef: { value: string; name: string };
   if (vendor_id) {
-    vendorRef = resolveVendorRef(vendor_id);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_id);
   } else if (vendor_name) {
-    vendorRef = resolveVendorRef(vendor_name);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_name);
   } else {
     throw new Error("Either vendor_name or vendor_id is required");
   }
-
-  // Resolve account refs
-  const lookupAccount = (name: string): { id: string; name: string; acctNum?: string } => {
-    let match = acctCache.byAcctNum.get(name.toLowerCase());
-    if (!match) match = acctCache.byName.get(name.toLowerCase());
-    if (!match) match = acctCache.items.find(a =>
-      a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-    );
-    if (match) return { id: match.Id, name: match.FullyQualifiedName || match.Name, acctNum: match.AcctNum };
-    throw new Error(`Account not found: "${name}"`);
-  };
 
   // Resolve department (header-level)
   let departmentRef: { value: string; name: string } | undefined;
@@ -121,19 +127,30 @@ export async function handleCreateBill(
   // Resolve AP account if specified
   let apAccountRef: { value: string; name: string } | undefined;
   if (ap_account) {
-    const acct = lookupAccount(ap_account);
-    apAccountRef = { value: acct.id, name: acct.name };
+    // QBO requires APAccountRef to be an A/P account; restricting the match keeps
+    // a loose partial hit from silently booking the bill against something else.
+    const acct = resolveAccountRef(acctCache, ap_account, {
+      label: "A/P account",
+      accountType: "Accounts Payable",
+    });
+    apAccountRef = { value: acct.value, name: acct.name };
   }
 
-  // Resolve lines
-  const resolvedLines = lines.map((line) => {
+  // Resolve lines. Customer resolution can hit the API, so this is a loop.
+  const resolvedLines: Array<CreateBillLine & {
+    account_id: string;
+    account_num?: string;
+    amount_cents: number;
+    customer_ref?: { value: string; name: string };
+  }> = [];
+  for (const line of lines) {
     let accountId = line.account_id;
     let accountName = line.account_name;
     let accountNum: string | undefined;
 
     if (!accountId && accountName) {
-      const account = lookupAccount(accountName);
-      accountId = account.id;
+      const account = resolveAccountRef(acctCache, accountName);
+      accountId = account.value;
       accountName = account.name;
       accountNum = account.acctNum;
     } else if (!accountId && !accountName) {
@@ -141,16 +158,18 @@ export async function handleCreateBill(
     }
 
     const amountCents = validateAmount(line.amount, `Line ${accountName || accountId}`);
+    const customerRef = await resolveCustomerInput(client, line, `Line ${accountName || accountId}`);
 
-    return {
+    resolvedLines.push({
       ...line,
       account_id: accountId!,
       account_name: accountName,
       account_num: accountNum,
       amount_cents: amountCents,
+      customer_ref: customerRef ?? undefined,
       amount: toDollars(amountCents),
-    };
-  });
+    });
+  }
 
   // Calculate total
   const totalCents = sumCents(resolvedLines.map(l => l.amount_cents));
@@ -164,18 +183,26 @@ export async function handleCreateBill(
     ...(doc_number && { DocNumber: doc_number }),
     ...(departmentRef && { DepartmentRef: departmentRef }),
     ...(apAccountRef && { APAccountRef: apAccountRef }),
-    Line: resolvedLines.map((line) => ({
-      Amount: line.amount,
-      DetailType: "AccountBasedExpenseLineDetail",
-      ...(line.description && { Description: line.description }),
-      AccountBasedExpenseLineDetail: {
-        AccountRef: {
-          value: line.account_id,
-          name: line.account_name,
+    Line: resolvedLines.map((line) => {
+      const classInput = line.class_id || line.class_name;
+      const classRef = classInput ? resolveClassRef(classInput) : undefined;
+      return {
+        Amount: line.amount,
+        DetailType: "AccountBasedExpenseLineDetail",
+        ...(line.description && { Description: line.description }),
+        AccountBasedExpenseLineDetail: {
+          AccountRef: {
+            value: line.account_id,
+            name: line.account_name,
+          },
+          // NotBillable is deliberate even with a CustomerRef: the line
+          // attributes cost to a customer without queuing it for re-invoicing.
+          BillableStatus: "NotBillable",
+          ...(classRef && { ClassRef: classRef }),
+          ...(line.customer_ref && { CustomerRef: line.customer_ref }),
         },
-        BillableStatus: "NotBillable",
-      },
-    })),
+      };
+    }),
   };
 
   if (draft) {
@@ -198,7 +225,7 @@ export async function handleCreateBill(
       "",
       "Lines:",
       ...resolvedLines.map(l =>
-        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.description ? ` "${l.description}"` : ""}`
+        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : ""}${l.description ? ` "${l.description}"` : ""}`
       ),
       "",
       "Set draft=false to create this bill.",
@@ -210,11 +237,11 @@ export async function handleCreateBill(
   }
 
   // Create the bill
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createBill(billObject, cb)
   ) as { Id: string; DocNumber?: string };
 
-  const qboUrl = `https://app.qbo.intuit.com/app/bill?txnId=${result.Id}`;
+  const qboUrl = buildQboUrl("bill", "txnId", result.Id);
 
   const response = [
     "Bill Created!",
@@ -258,15 +285,18 @@ export async function handleGetBill(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        CustomerRef?: { value: string; name?: string };
+        BillableStatus?: string;
       };
       ItemBasedExpenseLineDetail?: {
         ItemRef: { value: string; name?: string };
         Qty?: number;
         UnitPrice?: number;
+        CustomerRef?: { value: string; name?: string };
       };
     }>;
   };
-  const qboUrl = `https://app.qbo.intuit.com/app/bill?txnId=${bill.Id}`;
+  const qboUrl = buildQboUrl("bill", "txnId", bill.Id);
 
   // Format summary
   const lines: string[] = [
@@ -290,8 +320,9 @@ export async function handleGetBill(
       const detail = line.AccountBasedExpenseLineDetail;
       const acctName = detail.AccountRef.name || detail.AccountRef.value;
       const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
+      const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: ${acctName}${deptStr} $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     } else if (line.ItemBasedExpenseLineDetail) {
       const detail = line.ItemBasedExpenseLineDetail;
       const itemName = detail.ItemRef.name || detail.ItemRef.value;
@@ -342,6 +373,8 @@ export async function handleEditBill(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        CustomerRef?: { value: string; name?: string };
+        BillableStatus?: string;
       };
     }>;
   };
@@ -351,32 +384,20 @@ export async function handleEditBill(
     ? await resolveVendor(client, vendor_name)
     : current.VendorRef;
 
-  // Determine if we're modifying lines - requires full update (not sparse)
-  const needsFullUpdate = lineChanges && lineChanges.length > 0;
-
-  // Build updated Bill
+  // Always sparse. A full update nulls every writable field absent from the
+  // payload (it dropped SalesTermRef here). Sparse also handles line changes,
+  // including deletion, provided the complete Line array is sent.
+  // See docs/quickbooks-api-limitations.md.
   // Note: VendorRef is required by QB API even for sparse updates
   const updated: Record<string, unknown> = {
     Id: current.Id,
     SyncToken: current.SyncToken,
     VendorRef: vendorRef,
+    sparse: true,
   };
 
-  // Only use sparse for non-line updates; full update needed for line modifications
-  // Note: node-quickbooks auto-sets sparse=true, so we must explicitly set sparse=false for full updates
-  if (!needsFullUpdate) {
-    updated.sparse = true;
-  } else {
-    // Full update: explicitly set sparse=false (node-quickbooks defaults to true)
-    updated.sparse = false;
-    updated.TxnDate = current.TxnDate;
-    updated.DueDate = current.DueDate;
-    updated.DocNumber = current.DocNumber;
-    updated.PrivateNote = current.PrivateNote;
-    if (current.DepartmentRef) {
-      updated.DepartmentRef = current.DepartmentRef;
-    }
-    // Copy lines and strip read-only fields
+  if (lineChanges && lineChanges.length > 0) {
+    // Seed with the existing lines, stripping read-only fields
     updated.Line = current.Line.map(line => {
       const { LineNum, ...rest } = line as Record<string, unknown>;
       return rest;
@@ -404,16 +425,23 @@ export async function handleEditBill(
   let finalLines = [...((updated.Line as typeof current.Line) || current.Line)];
 
   if (lineChanges && lineChanges.length > 0) {
-    const acctCache = await getAccountCache(client);
+    const [acctCache, classCacheData] = await Promise.all([
+      getAccountCache(client),
+      getClassCache(client),
+    ]);
 
-    const resolveAcct = (name: string) => {
-      let match = acctCache.byAcctNum.get(name.toLowerCase());
-      if (!match) match = acctCache.byName.get(name.toLowerCase());
-      if (!match) match = acctCache.items.find(a =>
-        a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
+    const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
+
+    const resolveClassRef = (nameOrId: string) => {
+      const byId = classCacheData.byId.get(nameOrId);
+      if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
+      const byName = classCacheData.byName.get(nameOrId.toLowerCase());
+      if (byName) return { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
+      const byPartial = classCacheData.items.find(c =>
+        (c.FullyQualifiedName || c.Name).toLowerCase().includes(nameOrId.toLowerCase())
       );
-      if (!match) throw new Error(`Account not found: "${name}"`);
-      return { value: match.Id, name: match.FullyQualifiedName || match.Name };
+      if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
+      throw new Error(`Class not found: "${nameOrId}"`);
     };
 
     for (const change of lineChanges) {
@@ -430,6 +458,9 @@ export async function handleEditBill(
           const detail = { ...(line.AccountBasedExpenseLineDetail || {}) } as {
             AccountRef: { value: string; name?: string };
             DepartmentRef?: { value: string; name?: string };
+            ClassRef?: { value: string; name?: string };
+            CustomerRef?: { value: string; name?: string };
+            BillableStatus?: string;
           };
 
           if (change.amount !== undefined) {
@@ -438,6 +469,18 @@ export async function handleEditBill(
           }
           if (change.description !== undefined) line.Description = change.description;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
+          const classInput = change.class_id ?? change.class_name;
+          if (classInput !== undefined) detail.ClassRef = resolveClassRef(classInput);
+
+          // Spreading the existing detail already preserves CustomerRef; only an
+          // explicit customer input changes it, and an empty one clears it.
+          const customerRef = await resolveCustomerInput(client, change, `Line ${change.line_id}`);
+          if (customerRef === null) {
+            delete detail.CustomerRef;
+          } else if (customerRef) {
+            detail.CustomerRef = customerRef;
+            detail.BillableStatus = detail.BillableStatus ?? "NotBillable";
+          }
 
           line.AccountBasedExpenseLineDetail = detail;
           line.DetailType = 'AccountBasedExpenseLineDetail';
@@ -452,12 +495,23 @@ export async function handleEditBill(
         const amountCents = validateAmount(change.amount, `New line for ${change.account_name}`);
 
         // Id omitted for new lines - QB will assign
+        const newClassInput = change.class_id ?? change.class_name;
+        const newCustomer = await resolveCustomerInput(
+          client,
+          change,
+          `New line for ${change.account_name}`
+        );
         const newLine = {
           Amount: toDollars(amountCents),
           Description: change.description,
           DetailType: 'AccountBasedExpenseLineDetail',
           AccountBasedExpenseLineDetail: {
             AccountRef: resolveAcct(change.account_name),
+            ...(newClassInput !== undefined && { ClassRef: resolveClassRef(newClassInput) }),
+            ...(newCustomer && {
+              CustomerRef: newCustomer,
+              BillableStatus: "NotBillable",
+            }),
           }
         } as typeof finalLines[0];
         finalLines.push(newLine);
@@ -467,7 +521,7 @@ export async function handleEditBill(
     updated.Line = finalLines;
   }
 
-  const qboUrl = `https://app.qbo.intuit.com/app/bill?txnId=${id}`;
+  const qboUrl = buildQboUrl("bill", "txnId", id);
 
   if (draft) {
     const previewLines: string[] = [
@@ -494,7 +548,8 @@ export async function handleEditBill(
         if (detail) {
           const acctName = detail.AccountRef.name || detail.AccountRef.value;
           const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
-          previewLines.push(`  ${acctName}${deptStr}: $${line.Amount.toFixed(2)}`);
+          const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+          previewLines.push(`  ${acctName}${deptStr}${custStr}: $${line.Amount.toFixed(2)}`);
         }
       }
     }
@@ -507,11 +562,11 @@ export async function handleEditBill(
     };
   }
 
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.updateBill(updated, cb)
   ) as { Id: string; SyncToken: string };
 
   return {
-    content: [{ type: "text", text: `Bill ${id} updated successfully.\nNew SyncToken: ${result.SyncToken}\nView in QuickBooks: ${qboUrl}` }],
+    content: [{ type: "text", text: formatUpdateResult("Bill", id, current.SyncToken, result.SyncToken, qboUrl) }],
   };
 }

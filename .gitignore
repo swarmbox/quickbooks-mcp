@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-test/
 dist-lambda/
+dist-test/
 deploy/
 .env
 .env.local
@@ -17,6 +18,9 @@ data/
 # Claude Code local settings and auto-generated files
 .claude/settings.local.json
 .claude/commands/CLAUDE.md
+# Worktrees Claude Code creates to isolate a session; checkouts of this repo,
+# never content of their own.
+.claude/worktrees/
 
 # development-workflow plugin rule symlinks (machine-specific; repo-specific rules may still be committed)
 .claude/rules/autonomy-conventions.md

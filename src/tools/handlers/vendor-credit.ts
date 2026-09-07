@@ -3,17 +3,26 @@
 import QuickBooks from "node-quickbooks";
 import {
   promisify,
+  promisifyWrite,
   getAccountCache,
   getDepartmentCache,
   getVendorCache,
+  resolveAccountRef,
+  resolveVendorRef,
+  resolveCustomerInput,
+  toQboRef,
 } from "../../client/index.js";
-import { validateAmount, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
 
+// As with bills: the header VendorRef is the vendor, and line-level attribution
+// is AccountBasedExpenseLineDetail.CustomerRef, which accepts customers only.
 interface CreateVendorCreditLine {
   account_id?: string;
   account_name?: string;
   amount: number;
   description?: string;
+  customer_name?: string;
+  customer_id?: string;
 }
 
 interface VendorCreditLineChange {
@@ -21,6 +30,8 @@ interface VendorCreditLineChange {
   account_name?: string;
   amount?: number;
   description?: string;
+  customer_name?: string;
+  customer_id?: string;
   delete?: boolean;
 }
 
@@ -57,40 +68,14 @@ export async function handleCreateVendorCredit(
   ]);
 
   // Resolve vendor
-  const resolveVendorRef = (nameOrId: string): { value: string; name: string } => {
-    const byId = vendorCacheData.byId.get(nameOrId);
-    if (byId) return { value: byId.Id, name: byId.DisplayName };
-
-    const byName = vendorCacheData.byName.get(nameOrId.toLowerCase());
-    if (byName) return { value: byName.Id, name: byName.DisplayName };
-
-    const byPartial = vendorCacheData.items.find(v =>
-      v.DisplayName.toLowerCase().includes(nameOrId.toLowerCase())
-    );
-    if (byPartial) return { value: byPartial.Id, name: byPartial.DisplayName };
-
-    throw new Error(`Vendor not found: "${nameOrId}"`);
-  };
-
   let vendorRef: { value: string; name: string };
   if (vendor_id) {
-    vendorRef = resolveVendorRef(vendor_id);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_id);
   } else if (vendor_name) {
-    vendorRef = resolveVendorRef(vendor_name);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_name);
   } else {
     throw new Error("Either vendor_name or vendor_id is required");
   }
-
-  // Resolve account refs
-  const lookupAccount = (name: string): { id: string; name: string; acctNum?: string } => {
-    let match = acctCache.byAcctNum.get(name.toLowerCase());
-    if (!match) match = acctCache.byName.get(name.toLowerCase());
-    if (!match) match = acctCache.items.find(a =>
-      a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-    );
-    if (match) return { id: match.Id, name: match.FullyQualifiedName || match.Name, acctNum: match.AcctNum };
-    throw new Error(`Account not found: "${name}"`);
-  };
 
   // Resolve department (header-level)
   let departmentRef: { value: string; name: string } | undefined;
@@ -119,19 +104,29 @@ export async function handleCreateVendorCredit(
   // Resolve AP account if specified
   let apAccountRef: { value: string; name: string } | undefined;
   if (ap_account) {
-    const acct = lookupAccount(ap_account);
-    apAccountRef = { value: acct.id, name: acct.name };
+    // Same A/P restriction as create_bill — the field feeds the same QBO ref.
+    const acct = resolveAccountRef(acctCache, ap_account, {
+      label: "A/P account",
+      accountType: "Accounts Payable",
+    });
+    apAccountRef = { value: acct.value, name: acct.name };
   }
 
-  // Resolve lines
-  const resolvedLines = lines.map((line) => {
+  // Resolve lines. Customer resolution can hit the API, so this is a loop.
+  const resolvedLines: Array<CreateVendorCreditLine & {
+    account_id: string;
+    account_num?: string;
+    amount_cents: number;
+    customer_ref?: { value: string; name: string };
+  }> = [];
+  for (const line of lines) {
     let accountId = line.account_id;
     let accountName = line.account_name;
     let accountNum: string | undefined;
 
     if (!accountId && accountName) {
-      const account = lookupAccount(accountName);
-      accountId = account.id;
+      const account = resolveAccountRef(acctCache, accountName);
+      accountId = account.value;
       accountName = account.name;
       accountNum = account.acctNum;
     } else if (!accountId && !accountName) {
@@ -139,16 +134,18 @@ export async function handleCreateVendorCredit(
     }
 
     const amountCents = validateAmount(line.amount, `Line ${accountName || accountId}`);
+    const customerRef = await resolveCustomerInput(client, line, `Line ${accountName || accountId}`);
 
-    return {
+    resolvedLines.push({
       ...line,
       account_id: accountId!,
       account_name: accountName,
       account_num: accountNum,
       amount_cents: amountCents,
+      customer_ref: customerRef ?? undefined,
       amount: toDollars(amountCents),
-    };
-  });
+    });
+  }
 
   // Calculate total
   const totalCents = sumCents(resolvedLines.map(l => l.amount_cents));
@@ -170,7 +167,10 @@ export async function handleCreateVendorCredit(
           value: line.account_id,
           name: line.account_name,
         },
+        // NotBillable is deliberate even with a CustomerRef: the line
+        // attributes cost to a customer without queuing it for re-invoicing.
         BillableStatus: "NotBillable",
+        ...(line.customer_ref && { CustomerRef: line.customer_ref }),
       },
     })),
   };
@@ -194,7 +194,7 @@ export async function handleCreateVendorCredit(
       "",
       "Lines:",
       ...resolvedLines.map(l =>
-        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.description ? ` "${l.description}"` : ""}`
+        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : ""}${l.description ? ` "${l.description}"` : ""}`
       ),
       "",
       "Set draft=false to create this vendor credit.",
@@ -206,11 +206,11 @@ export async function handleCreateVendorCredit(
   }
 
   // Create the vendor credit
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createVendorCredit(vcObject, cb)
   ) as { Id: string; DocNumber?: string };
 
-  const qboUrl = `https://app.qbo.intuit.com/app/vendorcredit?txnId=${result.Id}`;
+  const qboUrl = buildQboUrl("vendorcredit", "txnId", result.Id);
 
   const response = [
     "Vendor Credit Created!",
@@ -254,10 +254,12 @@ export async function handleGetVendorCredit(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        CustomerRef?: { value: string; name?: string };
+        BillableStatus?: string;
       };
     }>;
   };
-  const qboUrl = `https://app.qbo.intuit.com/app/vendorcredit?txnId=${vc.Id}`;
+  const qboUrl = buildQboUrl("vendorcredit", "txnId", vc.Id);
 
   // Format summary
   const lines: string[] = [
@@ -281,8 +283,9 @@ export async function handleGetVendorCredit(
       const detail = line.AccountBasedExpenseLineDetail;
       const acctName = detail.AccountRef.name || detail.AccountRef.value;
       const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
+      const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: ${acctName}${deptStr} $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     }
   }
 
@@ -325,12 +328,14 @@ export async function handleEditVendorCredit(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        CustomerRef?: { value: string; name?: string };
+        BillableStatus?: string;
       };
     }>;
   };
 
   // Determine if we're modifying lines - requires full update (not sparse)
-  const needsFullUpdate = lineChanges && lineChanges.length > 0;
+  const needsLineRebuild = lineChanges && lineChanges.length > 0;
 
   // Build updated VendorCredit
   // Note: VendorRef is required by QB API even for sparse updates
@@ -342,17 +347,13 @@ export async function handleEditVendorCredit(
     VendorRef: vendorRef,
   };
 
-  if (!needsFullUpdate) {
-    updated.sparse = true;
-  } else {
-    updated.sparse = false;
-    updated.TxnDate = current.TxnDate;
-    updated.PrivateNote = current.PrivateNote;
-    updated.DocNumber = current.DocNumber;
-    if (current.DepartmentRef) {
-      updated.DepartmentRef = current.DepartmentRef;
-    }
-    // Copy lines and strip read-only fields
+  // Always sparse. A full update nulls every writable field absent from the
+  // payload. Sparse also handles line changes, including deletion, provided the
+  // complete Line array is sent. See docs/quickbooks-api-limitations.md.
+  updated.sparse = true;
+
+  if (needsLineRebuild) {
+    // Seed with the existing lines, stripping read-only fields
     updated.Line = current.Line.map(line => {
       const { LineNum, ...rest } = line as Record<string, unknown>;
       return rest;
@@ -362,19 +363,7 @@ export async function handleEditVendorCredit(
   // Resolve vendor if changing
   if (vendor_name) {
     const vendorCacheData = await getVendorCache(client);
-    const byName = vendorCacheData.byName.get(vendor_name.toLowerCase());
-    if (byName) {
-      vendorRef = { value: byName.Id, name: byName.DisplayName };
-    } else {
-      const byPartial = vendorCacheData.items.find(v =>
-        v.DisplayName.toLowerCase().includes(vendor_name.toLowerCase())
-      );
-      if (byPartial) {
-        vendorRef = { value: byPartial.Id, name: byPartial.DisplayName };
-      } else {
-        throw new Error(`Vendor not found: "${vendor_name}"`);
-      }
-    }
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_name);
     updated.VendorRef = vendorRef;
   }
 
@@ -388,15 +377,7 @@ export async function handleEditVendorCredit(
   if (lineChanges && lineChanges.length > 0) {
     const acctCache = await getAccountCache(client);
 
-    const resolveAcct = (name: string) => {
-      let match = acctCache.byAcctNum.get(name.toLowerCase());
-      if (!match) match = acctCache.byName.get(name.toLowerCase());
-      if (!match) match = acctCache.items.find(a =>
-        a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-      );
-      if (!match) throw new Error(`Account not found: "${name}"`);
-      return { value: match.Id, name: match.FullyQualifiedName || match.Name };
-    };
+    const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
 
     for (const change of lineChanges) {
       if (change.line_id) {
@@ -412,6 +393,8 @@ export async function handleEditVendorCredit(
           const detail = { ...(line.AccountBasedExpenseLineDetail || {}) } as {
             AccountRef: { value: string; name?: string };
             DepartmentRef?: { value: string; name?: string };
+            CustomerRef?: { value: string; name?: string };
+            BillableStatus?: string;
           };
 
           if (change.amount !== undefined) {
@@ -420,6 +403,16 @@ export async function handleEditVendorCredit(
           }
           if (change.description !== undefined) line.Description = change.description;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
+
+          // Spreading the existing detail already preserves CustomerRef; only an
+          // explicit customer input changes it, and an empty one clears it.
+          const customerRef = await resolveCustomerInput(client, change, `Line ${change.line_id}`);
+          if (customerRef === null) {
+            delete detail.CustomerRef;
+          } else if (customerRef) {
+            detail.CustomerRef = customerRef;
+            detail.BillableStatus = detail.BillableStatus ?? "NotBillable";
+          }
 
           line.AccountBasedExpenseLineDetail = detail;
           line.DetailType = 'AccountBasedExpenseLineDetail';
@@ -432,12 +425,22 @@ export async function handleEditVendorCredit(
 
         const amountCents = validateAmount(change.amount, `New line for ${change.account_name}`);
 
+        const newCustomer = await resolveCustomerInput(
+          client,
+          change,
+          `New line for ${change.account_name}`
+        );
+
         const newLine = {
           Amount: toDollars(amountCents),
           Description: change.description,
           DetailType: 'AccountBasedExpenseLineDetail',
           AccountBasedExpenseLineDetail: {
             AccountRef: resolveAcct(change.account_name),
+            ...(newCustomer && {
+              CustomerRef: newCustomer,
+              BillableStatus: "NotBillable",
+            }),
           }
         } as typeof finalLines[0];
         finalLines.push(newLine);
@@ -447,7 +450,7 @@ export async function handleEditVendorCredit(
     updated.Line = finalLines;
   }
 
-  const qboUrl = `https://app.qbo.intuit.com/app/vendorcredit?txnId=${id}`;
+  const qboUrl = buildQboUrl("vendorcredit", "txnId", id);
 
   if (draft) {
     const previewLines: string[] = [
@@ -472,7 +475,8 @@ export async function handleEditVendorCredit(
         if (detail) {
           const acctName = detail.AccountRef.name || detail.AccountRef.value;
           const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
-          previewLines.push(`  ${acctName}${deptStr}: $${line.Amount.toFixed(2)}`);
+          const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+          previewLines.push(`  ${acctName}${deptStr}${custStr}: $${line.Amount.toFixed(2)}`);
         }
       }
     }
@@ -485,11 +489,11 @@ export async function handleEditVendorCredit(
     };
   }
 
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.updateVendorCredit(updated, cb)
   ) as { Id: string; SyncToken: string };
 
   return {
-    content: [{ type: "text", text: `Vendor Credit ${id} updated successfully.\nNew SyncToken: ${result.SyncToken}\nView in QuickBooks: ${qboUrl}` }],
+    content: [{ type: "text", text: formatUpdateResult("Vendor Credit", id, current.SyncToken, result.SyncToken, qboUrl) }],
   };
 }

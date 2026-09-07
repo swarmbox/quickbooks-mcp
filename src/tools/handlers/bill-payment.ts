@@ -8,10 +8,14 @@
 import QuickBooks from "node-quickbooks";
 import {
   promisify,
+  promisifyWrite,
   getAccountCache,
   getVendorCache,
+  resolveAccountRef,
+  resolveVendorRef,
+  toQboRef,
 } from "../../client/index.js";
-import { validateAmount, toCents, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toCents, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
 
 interface BillPaymentBillInput {
   bill_id: string;
@@ -62,43 +66,26 @@ export async function handleCreateBillPayment(
   ]);
 
   // Resolve vendor
-  const resolveVendorRef = (nameOrId: string): { value: string; name: string } => {
-    const byId = vendorCacheData.byId.get(nameOrId);
-    if (byId) return { value: byId.Id, name: byId.DisplayName };
-
-    const byName = vendorCacheData.byName.get(nameOrId.toLowerCase());
-    if (byName) return { value: byName.Id, name: byName.DisplayName };
-
-    const byPartial = vendorCacheData.items.find(v =>
-      v.DisplayName.toLowerCase().includes(nameOrId.toLowerCase())
-    );
-    if (byPartial) return { value: byPartial.Id, name: byPartial.DisplayName };
-
-    throw new Error(`Vendor not found: "${nameOrId}"`);
-  };
-
   let vendorRef: { value: string; name: string };
   if (vendor_id) {
-    vendorRef = resolveVendorRef(vendor_id);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_id);
   } else if (vendor_name) {
-    vendorRef = resolveVendorRef(vendor_name);
+    vendorRef = resolveVendorRef(vendorCacheData, vendor_name);
   } else {
     throw new Error("Either vendor_name or vendor_id is required");
   }
 
-  // Resolve bank account
-  const lookupAccount = (name: string): { id: string; name: string } => {
-    let match = acctCache.byAcctNum.get(name.toLowerCase());
-    if (!match) match = acctCache.byName.get(name.toLowerCase());
-    if (!match) match = acctCache.items.find(a =>
-      a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-    );
-    if (match) return { id: match.Id, name: match.FullyQualifiedName || match.Name };
-    throw new Error(`Account not found: "${name}"`);
-  };
-
-  const bankAcct = lookupAccount(payment_account);
-  const bankAccountRef = { value: bankAcct.id, name: bankAcct.name };
+  // Resolve bank account. Restricted to Bank-type: this tool moves money, and an
+  // unrestricted partial match can land on an account that merely shares digits or
+  // words with the intended one (on this chart of accounts "Payroll" resolves to
+  // an accrued-wages liability, not the payroll checking account). A Check-type
+  // BillPayment requires a Bank account anyway.
+  const bankAccountRef = toQboRef(
+    resolveAccountRef(acctCache, payment_account, {
+      label: "Payment account",
+      accountType: "Bank",
+    })
+  );
 
   // Fetch each bill: validates it exists, belongs to the vendor, and supplies
   // the open balance as the default amount to apply.
@@ -230,11 +217,11 @@ export async function handleCreateBillPayment(
   }
 
   // Create the bill payment
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createBillPayment(bpObject, cb)
   ) as { Id: string; DocNumber?: string };
 
-  const qboUrl = `https://app.qbo.intuit.com/app/billpayment?txnId=${result.Id}`;
+  const qboUrl = buildQboUrl("billpayment", "txnId", result.Id);
 
   const response = [
     "Bill Payment Created!",
@@ -281,7 +268,7 @@ export async function handleGetBillPayment(
       LinkedTxn?: Array<{ TxnId: string; TxnType: string }>;
     }>;
   };
-  const qboUrl = `https://app.qbo.intuit.com/app/billpayment?txnId=${bp.Id}`;
+  const qboUrl = buildQboUrl("billpayment", "txnId", bp.Id);
 
   const payAcct = bp.CheckPayment?.BankAccountRef || bp.CreditCardPayment?.CCAccountRef;
 

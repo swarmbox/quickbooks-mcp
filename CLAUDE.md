@@ -4,6 +4,31 @@
 
 This is a Model Context Protocol (MCP) server that provides Claude with access to QuickBooks Online. It enables Claude to query, create, and edit accounting data including journal entries, bills, expenses, and reports.
 
+## This Repository Is Public
+
+Everything published here is world-readable: commit messages, PR titles, bodies
+and comments, issue text, code, comments, tests and fixtures.
+
+This server is developed against a live production QuickBooks company, so real
+data is always within reach while debugging. **None of it belongs in anything
+published here.** That means no company or trade names, no location or store
+identifiers, no chart-of-accounts names or numbers taken from the live books, no
+real dollar amounts, and no customer or vendor names.
+
+Use invented fixtures instead — departments like `North`/`South`, accounts like
+`4000 Sales`, round amounts like `100.00`.
+
+The rule that matters most in practice: **when a bug is found against live data,
+describe the shape of the input, not the input.** "A sub-account name longer than
+the column width" and "a value column with no title" are what make a bug
+reproducible; pasting the real row adds nothing a reader needs and is how live
+figures end up in a public changelog. The same applies to verification evidence —
+report what was asserted, not a dump of the books.
+
+Redacting after the fact is awkward: issue and PR bodies can be edited, but
+commit messages are permanent without a history rewrite. Get it right on the way
+in.
+
 ## Git Workflow
 
 This repo uses a branch-and-PR workflow. All changes to `master` land via pull request — the merge is a human gate. The agent drives work all the way to an open PR autonomously, then stops for the developer to review and merge.
@@ -84,12 +109,12 @@ All write operations (create/edit) default to `draft: true`:
 
 Names are auto-resolved to IDs using cached lookups:
 - `account_name: "Tips"` → looks up ID from cache
-- `department_name: "Santa Rosa"` → looks up ID from cache
+- `department_name: "North"` → looks up ID from cache
 - Caches are session-scoped with TTL
 
 ### QBO Error Handling (Never Leak Tokens)
 
-**(I3 / CWE-532).** Never print, log, or serialize a **raw** HTTP/axios error object on any QuickBooks-touching path — no `JSON.stringify(error)`, `console.error(error)`, `util.inspect(error)`, or raw re-throw into a print/log sink. Raw QBO errors can carry the request config, including `Authorization: Bearer <access-token>` — a live-token leak. Extract **only** the HTTP status and the QBO Fault `code`/`message`/`detail`; always strip `Authorization`, request headers, and request config. Use `toSafeErrorText` (`src/utils/safe-error.ts`), built on `extractQBErrorInfo` (`src/types/quickbooks.ts`). Reference pattern: `@swarmbox/qbo-connector`'s `toQboError`.
+**(I3 / CWE-532).** Never print, log, or serialize a **raw** HTTP/axios error object on any QuickBooks-touching path — no `JSON.stringify(error)`, `console.error(error)`, `util.inspect(error)`, or raw re-throw into a print/log sink. Raw QBO errors can carry the request config, including `Authorization: Bearer <access-token>` — a live-token leak. Extract **only** the HTTP status and the QBO Fault `code`/`message`/`detail`; always strip `Authorization`, request headers, and request config. Use `formatQboError` (`src/utils/errors.ts`), which finds the Fault wherever it sits and redacts credential-bearing keys (`config`, `headers`, `Authorization`, tokens) from its fallback dump. Reference pattern: `@swarmbox/qbo-connector`'s `toQboError`.
 
 ## Adding a New Tool
 
@@ -113,7 +138,25 @@ When building the `reportData` object passed to `outputReport()`, ask: **does th
 - **Yes**: Structured summaries, metadata, entity objects needed for follow-up edits (SyncToken, line IDs)
 - **No**: Raw API responses, full transaction lists for summary-only tools, redundant data the summary already covers
 
-For tools that return large datasets, cap the detail for HTTP mode using `isHttpMode()` from `src/utils/output.ts`. Compute summaries from the full data, then truncate the detail. See `account-transactions.ts` (`HTTP_TXN_LIMIT`) for the pattern.
+For tools that return large datasets, cap the detail for HTTP mode using `isHttpMode()` from `src/utils/output.ts`. Compute summaries from the full data, then window the detail. See `account-transactions.ts` (`HTTP_DEFAULT_LIMIT`) for the pattern.
+
+A cap alone is a dead end — the remote caller has no filesystem and cannot reach the rest. Pair it with a way out:
+
+- Window on whole records, not lines, so a page boundary can't split a transaction.
+- Default the window by transport: bounded in HTTP, full result set in stdio (the temp file is free).
+- Report the position back (`pagination.nextOffset`) **and** say so in the summary text — `query` emits `STARTPOSITION`, `query_account_transactions` emits `offset=`. A truncation notice with no continuation hint is a bug.
+- Keep totals computed over the full set so they never change as the caller pages.
+
+Report tools take the other route: their rendered summary already carries the
+numbers, so the raw payload is opt-in via `outputReport`'s `includeRaw` (see
+`get_profit_loss`'s `include_raw`). `includeRaw` defaults to **true**, so entity
+reads — where the payload *is* the answer — are unaffected; only the report
+handlers pass `false`. Prefer this to capping a payload: a sliced
+`JSON.stringify` is invalid JSON, unparseable by any consumer and only partly
+legible to a model, while still costing most of the tokens. If you drop data from
+the default response, make sure the summary can still answer what the payload
+answered — `columns: "all"` exists because collapsing every row to its total
+column would otherwise have hidden per-department values entirely.
 
 ## Common Files
 
@@ -122,6 +165,7 @@ For tools that return large datasets, cap the detail for HTTP mode using `isHttp
 | Change query behavior | `src/query/pagination.ts` |
 | Money utilities | `src/utils/money.ts` |
 | API client | `src/client/quickbooks.ts` |
+| Entities node-quickbooks doesn't wrap | `src/client/rest.ts` |
 | Output mode (stdio/http) | `src/utils/output.ts` |
 
 ## Critical Limitations
@@ -129,7 +173,7 @@ For tools that return large datasets, cap the detail for HTTP mode using `isHttp
 ### Expenses Cannot Split Across Departments
 
 QBO expenses (Purchases) only support **one department at the header level**. You cannot create an expense with lines in different departments. If a charge covers multiple locations:
-- **Do NOT try to edit expense lines** — `edit_expense` with line changes strips `DepartmentRef` and `EntityRef` (vendor) from the header due to a bug in the full-update code path.
+- Editing expense lines is safe as of the sparse-update fix (#37): edits no longer null `DepartmentRef`, `EntityRef`, or other header fields. This does **not** lift the one-department-per-expense limit below — that is a QBO data-model constraint, not a bug.
 - **Use a reclassification JE** to move amounts between departments after the fact.
 - **Use the bill-splitting workflow** (frontend) to create separate per-department bills from a single vendor invoice.
 
@@ -156,4 +200,15 @@ Both builds must pass before committing. After changes, restart Claude Code to r
   - Bill: `VendorRef`
   - Purchase (Expense): `PaymentType`
 - Department/Location filtering must be done client-side (not in QB queries)
+- Intuit throttles per realm. Fan out queries with `mapWithConcurrency` (not a
+  bare `Promise.all`) and let `withRetry` in `src/client/throttle.ts` handle
+  429/5xx — a throttled query returns empty, which silently reads as "no data"
+- **Parent vs. sub-account**: report-based tools (`account_period_summary`) roll
+  sub-accounts up into the parent; entity-based tools (`query_account_transactions`)
+  match the exact account ID only. Pass `include_subaccounts: true` to make them
+  agree. Walk the tree with `collectAccountTree` — QBO nests up to 5 deep, so
+  checking `ParentRef` one level is not enough
+- node-quickbooks only wraps ~35 entities; use `src/client/rest.ts` for the rest
+- Some postings have no account reference in the payload (A/R, sales tax) and are
+  invisible to entity-based reads — see `docs/entity-coverage.md`
 - See `docs/quickbooks-api-limitations.md` for details
