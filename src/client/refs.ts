@@ -12,7 +12,7 @@
 // internal Id first, which the handler chain deliberately does not (handlers take
 // account_id as its own parameter).
 
-import type { AccountCache, VendorCache, EmployeeCache, CachedAccount } from "../types/index.js";
+import type { AccountCache, VendorCache, EmployeeCache, ClassCache, CachedAccount } from "../types/index.js";
 
 // QBO ref shape. Accounts carry AcctNum along because callers echo it back in
 // their reports.
@@ -146,6 +146,31 @@ export function resolveVendorRef(cache: VendorCache, nameOrId: string): VendorRe
   if (byPartial) return { value: byPartial.Id, name: byPartial.DisplayName };
 
   throw new Error(`Vendor not found: "${nameOrId}"`);
+}
+
+// Resolve a class by internal Id, exact name, exact FullyQualifiedName, or a
+// partial match on the qualified name.
+//
+// Classes differ from vendors and employees in one way that matters: they nest,
+// so the name a user types may be either the leaf ("Downtown") or the full path
+// ("South:Downtown"). getClassCache indexes byName under both, and the resolved
+// display name is always the qualified form — that is what QBO echoes back and
+// what the previews print, so resolving by leaf still reports the full path.
+export function resolveClassRef(cache: ClassCache, nameOrId: string): VendorRef {
+  const byId = cache.byId.get(nameOrId);
+  if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
+
+  const key = nameOrId.toLowerCase();
+
+  const byName = cache.byName.get(key);
+  if (byName) return { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
+
+  const byPartial = cache.items.find(c =>
+    (c.FullyQualifiedName || c.Name).toLowerCase().includes(key)
+  );
+  if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
+
+  throw new Error(`Class not found: "${nameOrId}"`);
 }
 
 // Resolve an employee by internal Id, exact DisplayName, or partial DisplayName.

@@ -228,6 +228,18 @@ export async function resolveItem(client: QuickBooks, nameOrId: string): Promise
   );
   let items = extractQueryResults<{ Id: string; Name: string; FullyQualifiedName?: string; Type?: string; UnitPrice?: number; Active?: boolean }>(result, 'Item');
 
+  // Then by Id. Every caller advertises "name or ID" and the miss below says so
+  // too, but nothing here ever queried Id: a cold lookup by id only worked if
+  // that item happened to have been resolved by name earlier in the session and
+  // was still cached. Tried after the exact-name match so an item literally
+  // named "42" still wins its own name. Mirrors resolveCustomer.
+  if (items.length === 0 && /^\d+$/.test(nameOrId.trim())) {
+    const byId = await promisify<unknown>((cb) =>
+      client.findItems([{ field: 'Id', value: nameOrId.trim(), operator: '=' }], cb)
+    );
+    items = extractQueryResults<typeof items[0]>(byId, 'Item');
+  }
+
   // If no exact match, try LIKE for partial matching
   if (items.length === 0) {
     const partialResult = await promisify<unknown>((cb) =>

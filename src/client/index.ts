@@ -29,6 +29,7 @@ export {
   resolveAccountRef,
   resolveVendorRef,
   resolveEmployeeRef,
+  resolveClassRef,
   normalizeEntityKind,
   ENTITY_KINDS,
   toQboRef,
@@ -45,6 +46,8 @@ export {
   resolveCustomerRef,
   resolveEntityInput,
   resolveCustomerInput,
+  resolveItemInput,
+  resolveClassInput,
   toDepositEntity,
   toJournalEntryEntity,
   toPurchaseEntityRef,
@@ -53,4 +56,6 @@ export type {
   EntityInputResult,
   EntityLineInput,
   CustomerLineInput,
+  ItemLineInput,
+  ClassLineInput,
 } from './entity-refs.js';

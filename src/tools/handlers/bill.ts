@@ -11,6 +11,7 @@ import {
   resolveVendor,
   resolveAccountRef,
   resolveVendorRef,
+  resolveClassRef,
   resolveCustomerInput,
   toQboRef,
 } from "../../client/index.js";
@@ -76,19 +77,6 @@ export async function handleCreateBill(
     getVendorCache(client),
     getClassCache(client),
   ]);
-
-  // Resolve a class (location/Class tracking) by id or name to a QBO ClassRef.
-  const resolveClassRef = (nameOrId: string): { value: string; name: string } => {
-    const byId = classCacheData.byId.get(nameOrId);
-    if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-    const byName = classCacheData.byName.get(nameOrId.toLowerCase());
-    if (byName) return { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-    const byPartial = classCacheData.items.find(c =>
-      (c.FullyQualifiedName || c.Name).toLowerCase().includes(nameOrId.toLowerCase())
-    );
-    if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-    throw new Error(`Class not found: "${nameOrId}"`);
-  };
 
   // Resolve vendor
   let vendorRef: { value: string; name: string };
@@ -185,7 +173,7 @@ export async function handleCreateBill(
     ...(apAccountRef && { APAccountRef: apAccountRef }),
     Line: resolvedLines.map((line) => {
       const classInput = line.class_id || line.class_name;
-      const classRef = classInput ? resolveClassRef(classInput) : undefined;
+      const classRef = classInput ? resolveClassRef(classCacheData, classInput) : undefined;
       return {
         Amount: line.amount,
         DetailType: "AccountBasedExpenseLineDetail",
@@ -432,18 +420,6 @@ export async function handleEditBill(
 
     const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
 
-    const resolveClassRef = (nameOrId: string) => {
-      const byId = classCacheData.byId.get(nameOrId);
-      if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-      const byName = classCacheData.byName.get(nameOrId.toLowerCase());
-      if (byName) return { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-      const byPartial = classCacheData.items.find(c =>
-        (c.FullyQualifiedName || c.Name).toLowerCase().includes(nameOrId.toLowerCase())
-      );
-      if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-      throw new Error(`Class not found: "${nameOrId}"`);
-    };
-
     for (const change of lineChanges) {
       if (change.line_id) {
         const lineIndex = finalLines.findIndex(l => l.Id === change.line_id);
@@ -470,7 +446,7 @@ export async function handleEditBill(
           if (change.description !== undefined) line.Description = change.description;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
           const classInput = change.class_id ?? change.class_name;
-          if (classInput !== undefined) detail.ClassRef = resolveClassRef(classInput);
+          if (classInput !== undefined) detail.ClassRef = resolveClassRef(classCacheData, classInput);
 
           // Spreading the existing detail already preserves CustomerRef; only an
           // explicit customer input changes it, and an empty one clears it.
@@ -507,7 +483,7 @@ export async function handleEditBill(
           DetailType: 'AccountBasedExpenseLineDetail',
           AccountBasedExpenseLineDetail: {
             AccountRef: resolveAcct(change.account_name),
-            ...(newClassInput !== undefined && { ClassRef: resolveClassRef(newClassInput) }),
+            ...(newClassInput !== undefined && { ClassRef: resolveClassRef(classCacheData, newClassInput) }),
             ...(newCustomer && {
               CustomerRef: newCustomer,
               BillableStatus: "NotBillable",
