@@ -3,16 +3,24 @@
 import QuickBooks from "node-quickbooks";
 import {
   promisify,
+  promisifyWrite,
   getAccountCache,
   getDepartmentCache,
+  resolveAccountRef,
+  resolveEntityInput,
+  toJournalEntryEntity,
+  toQboRef,
 } from "../../client/index.js";
+import type { ResolvedEntityRef } from "../../client/index.js";
 import {
+  buildQboUrl,
   validateAmount,
   sumCents,
   validateBalance,
   toDollars,
   formatDollars,
   outputReport,
+  formatUpdateResult,
 } from "../../utils/index.js";
 
 interface JournalEntryLine {
@@ -23,6 +31,9 @@ interface JournalEntryLine {
   department_id?: string;
   department_name?: string;
   description?: string;
+  entity_name?: string;
+  entity_id?: string;
+  entity_type?: string;
 }
 
 interface JournalEntryLineChange {
@@ -32,7 +43,24 @@ interface JournalEntryLineChange {
   posting_type?: "Debit" | "Credit";
   department_name?: string;
   description?: string;
+  entity_name?: string;
+  entity_id?: string;
+  entity_type?: string;
   delete?: boolean;
+}
+
+// The QBO shape: JournalEntryLineDetail.Entity nests the ref inside a
+// Type/EntityRef pair, unlike every other line detail's flat ReferenceType.
+interface JournalEntryLineEntity {
+  Type: string;
+  EntityRef: { value: string; name?: string };
+}
+
+// Render an entity for a preview line, e.g. " <Vendor: Acme Supply Co>".
+function formatLineEntity(entity: JournalEntryLineEntity | undefined): string {
+  if (!entity) return "";
+  const name = entity.EntityRef?.name || entity.EntityRef?.value;
+  return name ? ` <${entity.Type}: ${name}>` : "";
 }
 
 export async function handleCreateJournalEntry(
@@ -56,30 +84,6 @@ export async function handleCreateJournalEntry(
     getDepartmentCache(client)
   ]);
 
-  // Helper to lookup account by name or AcctNum from cache
-  const lookupAccount = (name: string): { id: string; name: string; acctNum?: string } => {
-    // Try exact AcctNum match (case-insensitive)
-    let match = acctCache.byAcctNum.get(name.toLowerCase());
-
-    // Try exact name match (case-insensitive)
-    if (!match) {
-      match = acctCache.byName.get(name.toLowerCase());
-    }
-
-    // Try partial match on FullyQualifiedName
-    if (!match) {
-      match = acctCache.items.find(a =>
-        a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase()) ||
-        a.FullyQualifiedName?.toLowerCase() === name.toLowerCase()
-      );
-    }
-
-    if (match) {
-      return { id: match.Id, name: match.FullyQualifiedName || match.Name, acctNum: match.AcctNum };
-    }
-    throw new Error(`Account not found: "${name}"`);
-  };
-
   // Helper to lookup department by name from cache
   const lookupDepartment = (name: string): { id: string; name: string } => {
     // Try exact name match (case-insensitive)
@@ -98,8 +102,15 @@ export async function handleCreateJournalEntry(
     throw new Error(`Department not found: "${name}"`);
   };
 
-  // Resolve account and department names to IDs (all lookups are from cache)
-  const resolvedLines = lines.map((line) => {
+  // Resolve account and department names to IDs (account/department lookups are
+  // from cache; entity resolution can hit the API, so this is a loop).
+  const resolvedLines: Array<JournalEntryLine & {
+    account_id: string;
+    account_num?: string;
+    amount_cents: number;
+    entity?: ResolvedEntityRef;
+  }> = [];
+  for (const line of lines) {
     let accountId = line.account_id;
     let accountName = line.account_name;
     let accountNum: string | undefined;
@@ -108,8 +119,8 @@ export async function handleCreateJournalEntry(
 
     // Resolve account
     if (!accountId && accountName) {
-      const account = lookupAccount(accountName);
-      accountId = account.id;
+      const account = resolveAccountRef(acctCache, accountName);
+      accountId = account.value;
       accountName = account.name;
       accountNum = account.acctNum;
     } else if (!accountId && !accountName) {
@@ -126,7 +137,11 @@ export async function handleCreateJournalEntry(
     // Validate and convert amount to cents
     const amountCents = validateAmount(line.amount, `Line ${accountName || accountId}`);
 
-    return {
+    // Resolve the line's entity (vendor/customer/employee). QBO requires one on
+    // any line posting to A/R or A/P and accepts it as attribution elsewhere.
+    const entity = await resolveEntityInput(client, line, `Line ${accountName || accountId}`);
+
+    resolvedLines.push({
       ...line,
       account_id: accountId!,
       account_name: accountName,
@@ -134,10 +149,11 @@ export async function handleCreateJournalEntry(
       department_id: departmentId,
       department_name: departmentName,
       amount_cents: amountCents,
+      entity: entity ?? undefined,
       // Normalize amount to exactly 2 decimal places
       amount: toDollars(amountCents)
-    };
-  });
+    });
+  }
 
   // Validate debits = credits using cents (exact integer comparison)
   const totalDebitsCents = sumCents(
@@ -169,7 +185,8 @@ export async function handleCreateJournalEntry(
           DepartmentRef: {
             value: line.department_id
           }
-        })
+        }),
+        ...(line.entity && { Entity: toJournalEntryEntity(line.entity) })
       }
     }))
   };
@@ -191,7 +208,7 @@ export async function handleCreateJournalEntry(
       "",
       "Lines:",
       ...resolvedLines.map(l =>
-        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_id ? ` [Dept: ${l.department_name || l.department_id}]` : ""}: $${l.amount.toFixed(2)}`
+        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_id ? ` [Dept: ${l.department_name || l.department_id}]` : ""}${l.entity ? ` <${l.entity.type}: ${l.entity.name}>` : ""}: $${l.amount.toFixed(2)}`
       ),
       "",
       doc_number
@@ -205,12 +222,12 @@ export async function handleCreateJournalEntry(
   }
 
   // Create the entry
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createJournalEntry(journalEntry, cb)
   ) as { Id: string; DocNumber?: string };
 
   // Build QuickBooks URL
-  const qboUrl = `https://app.qbo.intuit.com/app/journal?txnId=${result.Id}`;
+  const qboUrl = buildQboUrl("journal", "txnId", result.Id);
 
   const response = [
     "Journal Entry Created!",
@@ -251,10 +268,11 @@ export async function handleGetJournalEntry(
         PostingType: string;
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        Entity?: JournalEntryLineEntity;
       };
     }>;
   };
-  const qboUrl = `https://app.qbo.intuit.com/app/journal?txnId=${je.Id}`;
+  const qboUrl = buildQboUrl("journal", "txnId", je.Id);
 
   // Format summary
   const lines: string[] = [
@@ -276,8 +294,9 @@ export async function handleGetJournalEntry(
     const acctName = detail.AccountRef.name || detail.AccountRef.value;
     const deptName = detail.DepartmentRef?.name || detail.DepartmentRef?.value;
     const deptStr = deptName ? ` [${deptName}]` : '';
+    const entityStr = formatLineEntity(detail.Entity);
     const descStr = line.Description ? ` "${line.Description}"` : '';
-    lines.push(`  Line ${line.Id}: ${detail.PostingType.padEnd(6)} ${acctName}${deptStr} $${line.Amount.toFixed(2)}${descStr}`);
+    lines.push(`  Line ${line.Id}: ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${entityStr} $${line.Amount.toFixed(2)}${descStr}`);
   }
 
   lines.push('');
@@ -321,12 +340,13 @@ export async function handleEditJournalEntry(
         PostingType: string;
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        Entity?: JournalEntryLineEntity;
       };
     }>;
   };
 
-  // Determine if we're modifying lines - requires full update (not sparse)
-  const needsFullUpdate = lineChanges && lineChanges.length > 0;
+  // Determine whether the Line array has to be rebuilt for this edit
+  const needsLineRebuild = lineChanges && lineChanges.length > 0;
 
   // Build updated JE
   const updated: Record<string, unknown> = {
@@ -334,17 +354,14 @@ export async function handleEditJournalEntry(
     SyncToken: current.SyncToken,
   };
 
-  // Only use sparse for non-line updates; full update needed for line modifications
-  // Note: node-quickbooks auto-sets sparse=true, so we must explicitly set sparse=false for full updates
-  if (!needsFullUpdate) {
-    updated.sparse = true;
-  } else {
-    // Full update: explicitly set sparse=false (node-quickbooks defaults to true)
-    updated.sparse = false;
-    updated.TxnDate = current.TxnDate;
-    updated.PrivateNote = current.PrivateNote;
-    updated.DocNumber = current.DocNumber;
-    // Copy lines and strip read-only fields
+  // Always sparse. A full update nulls every writable field absent from the
+  // payload (Adjustment here). Sparse also handles line changes, including
+  // deletion, provided the complete Line array is sent.
+  // See docs/quickbooks-api-limitations.md.
+  updated.sparse = true;
+
+  if (needsLineRebuild) {
+    // Seed with the existing lines, stripping read-only fields
     updated.Line = current.Line.map(line => {
       const { LineNum, ...rest } = line as Record<string, unknown>;
       return rest;
@@ -368,15 +385,7 @@ export async function handleEditJournalEntry(
     ]);
 
     // Helper to resolve account
-    const resolveAcct = (name: string) => {
-      let match = acctCache.byAcctNum.get(name.toLowerCase());
-      if (!match) match = acctCache.byName.get(name.toLowerCase());
-      if (!match) match = acctCache.items.find(a =>
-        a.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-      );
-      if (!match) throw new Error(`Account not found: "${name}"`);
-      return { value: match.Id, name: match.FullyQualifiedName || match.Name };
-    };
+    const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
 
     // Helper to resolve department
     const resolveDept = (name: string) => {
@@ -414,6 +423,12 @@ export async function handleEditJournalEntry(
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
           if (change.department_name !== undefined) detail.DepartmentRef = resolveDept(change.department_name);
 
+          // Spreading the existing detail already preserves Entity; only an
+          // explicit entity input changes it, and an empty one clears it.
+          const entity = await resolveEntityInput(client, change, `Line ${change.line_id}`);
+          if (entity === null) delete detail.Entity;
+          else if (entity) detail.Entity = toJournalEntryEntity(entity);
+
           line.JournalEntryLineDetail = detail;
           finalLines[lineIndex] = line;
         }
@@ -426,6 +441,12 @@ export async function handleEditJournalEntry(
         // Validate and normalize the amount
         const amountCents = validateAmount(change.amount, `New line for ${change.account_name}`);
 
+        const newEntity = await resolveEntityInput(
+          client,
+          change,
+          `New line for ${change.account_name}`
+        );
+
         // Id omitted for new lines - QB will assign
         const newLine = {
           Amount: toDollars(amountCents),
@@ -434,7 +455,8 @@ export async function handleEditJournalEntry(
           JournalEntryLineDetail: {
             PostingType: change.posting_type,
             AccountRef: resolveAcct(change.account_name),
-            ...(change.department_name && { DepartmentRef: resolveDept(change.department_name) })
+            ...(change.department_name && { DepartmentRef: resolveDept(change.department_name) }),
+            ...(newEntity && { Entity: toJournalEntryEntity(newEntity) })
           }
         } as typeof finalLines[0];
         finalLines.push(newLine);
@@ -457,7 +479,7 @@ export async function handleEditJournalEntry(
     validateBalance(totalDebitsCents, totalCreditsCents);
   }
 
-  const qboUrl = `https://app.qbo.intuit.com/app/journal?txnId=${id}`;
+  const qboUrl = buildQboUrl("journal", "txnId", id);
 
   if (draft) {
     // Preview mode
@@ -481,7 +503,8 @@ export async function handleEditJournalEntry(
         const detail = line.JournalEntryLineDetail;
         const acctName = detail.AccountRef.name || detail.AccountRef.value;
         const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
-        previewLines.push(`  ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}: $${line.Amount.toFixed(2)}`);
+        const entityStr = formatLineEntity(detail.Entity);
+        previewLines.push(`  ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${entityStr}: $${line.Amount.toFixed(2)}`);
       }
     }
 
@@ -494,11 +517,11 @@ export async function handleEditJournalEntry(
   }
 
   // Apply the update
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.updateJournalEntry(updated, cb)
   ) as { Id: string; SyncToken: string };
 
   return {
-    content: [{ type: "text", text: `Journal Entry ${id} updated successfully.\nNew SyncToken: ${result.SyncToken}\nView in QuickBooks: ${qboUrl}` }],
+    content: [{ type: "text", text: formatUpdateResult("Journal Entry", id, current.SyncToken, result.SyncToken, qboUrl) }],
   };
 }

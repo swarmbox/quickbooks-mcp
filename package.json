@@ -1,6 +1,6 @@
 {
   "name": "quickbooks-mcp",
-  "version": "0.5.2",
+  "version": "0.11.0",
   "description": "MCP server for QuickBooks Online API integration",
   "license": "MIT",
   "mcpName": "io.github.laf-rge/quickbooks-mcp",
@@ -21,11 +21,11 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "tsc -p tsconfig.test.json && node --enable-source-maps --test \"dist-test/tests/**/*.test.js\"",
     "build:lambda": "esbuild src/lambda.ts --bundle --platform=node --target=node22 --outfile=dist-lambda/handler.mjs --format=esm --external:@aws-sdk/* --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
     "prepare": "npm run build",
     "start": "node dist/index.js",
-    "dev": "tsc --watch",
-    "test": "tsc -p tsconfig.test.json && node --test \"dist-test/**/*.test.js\""
+    "dev": "tsc --watch"
   },
   "keywords": [
     "mcp",

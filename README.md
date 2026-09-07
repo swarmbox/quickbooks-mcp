@@ -261,7 +261,6 @@ QBO_INLINE_OUTPUT=true
       "args": ["-y", "quickbooks-mcp"],
       "env": {
         "QBO_CREDENTIAL_MODE": "local",
-        "QBO_CREDENTIAL_FILE": "~/.quickbooks-mcp/credentials.json",
         "QBO_INLINE_OUTPUT": "true"
       }
     }
@@ -280,9 +279,9 @@ QBO_INLINE_OUTPUT=true
 | `QBO_CREDENTIAL_MODE` | `local` | Credential storage: `local` or `aws` |
 | `QBO_CLIENT_ID` | - | QuickBooks app Client ID (local mode) |
 | `QBO_CLIENT_SECRET` | - | QuickBooks app Client Secret (local mode) |
-| `QBO_CREDENTIAL_FILE` | `~/.quickbooks-mcp/credentials.json` | Custom credential file path |
+| `QBO_CREDENTIAL_FILE` | `~/.quickbooks-mcp/credentials.json` | Custom credential file path. A leading `~` is expanded to your home directory, so it works in an MCP client's JSON `env` block where no shell is present to expand it. |
 | `QBO_INLINE_OUTPUT` | `false` | Return responses inline instead of writing to `/tmp` files. Required when using Claude Desktop or plugin environments where file-based output is not accessible to the model. |
-| `QBO_SANDBOX` | `false` | Use QuickBooks sandbox environment |
+| `QBO_SANDBOX` | `false` | Use QuickBooks sandbox environment. Also switches the "View in QuickBooks" deep links to `app.sandbox.qbo.intuit.com` so they cannot open the production company. |
 | `AWS_REGION` | `us-east-2` | AWS region (aws mode) |
 | `QBO_SECRET_NAME` | `prod/qbo` | Secrets Manager secret name (aws mode) |
 | `QBO_COMPANY_ID_PARAM` | `/prod/qbo/company_id` | SSM parameter path (aws mode) |
@@ -301,19 +300,20 @@ QBO_INLINE_OUTPUT=true
 | `list_accounts` | List chart of accounts with filtering |
 | `get_profit_loss` | Profit & Loss report (by month, department, class, etc.) |
 | `get_balance_sheet` | Balance Sheet report |
-| `get_trial_balance` | Trial Balance report |
-| `query_account_transactions` | All transactions affecting a specific account |
+| `get_trial_balance` | Trial Balance report (`flags: true` adds a close-review pass for wrong-side and uncategorized/suspense balances) |
+| `get_report` | Any of 24 other QuickBooks reports — A/R and A/P aging, customer and vendor balances, transaction lists, general ledger, journal, sales by customer/item/class/department, cash flow, and the detail variants |
+| `query_account_transactions` | All transactions affecting a specific account (13 posting entity types, paginated, optional sub-account rollup; see `docs/entity-coverage.md` for limits) |
 | `account_period_summary` | Period summary for an account (opening/closing balance, debits, credits, count) |
 | **Journal Entries** | |
-| `create_journal_entry` | Create a journal entry (validates debits = credits) |
+| `create_journal_entry` | Create a journal entry (validates debits = credits; lines take `entity_name`/`entity_type`) |
 | `get_journal_entry` | Fetch a journal entry by ID |
 | `edit_journal_entry` | Modify an existing journal entry |
 | **Bills** | |
-| `create_bill` | Create a vendor bill |
+| `create_bill` | Create a vendor bill (lines take `customer_name`) |
 | `get_bill` | Fetch a bill by ID |
 | `edit_bill` | Modify an existing bill |
 | **Expenses** | |
-| `create_expense` | Create an expense (Cash, Check, or Credit Card) |
+| `create_expense` | Create an expense (Cash, Check, or Credit Card; payee may be a vendor, customer, or employee) |
 | `get_expense` | Fetch an expense by ID |
 | `edit_expense` | Modify an existing expense |
 | **Sales Receipts** | |
@@ -325,18 +325,63 @@ QBO_INLINE_OUTPUT=true
 | `get_invoice` | Fetch an invoice by ID |
 | `edit_invoice` | Modify an existing invoice |
 | **Deposits** | |
-| `create_deposit` | Create a bank deposit |
+| `create_deposit` | Create a bank deposit (lines take `entity_name`/`entity_type`) |
 | `get_deposit` | Fetch a deposit by ID |
-| `edit_deposit` | Modify an existing deposit |
+| `edit_deposit` | Modify an existing deposit (lines take `entity_name`/`entity_type`) |
 | **Vendor Credits** | |
-| `create_vendor_credit` | Create a vendor credit |
+| `create_vendor_credit` | Create a vendor credit (lines take `customer_name`) |
 | `get_vendor_credit` | Fetch a vendor credit by ID |
 | `edit_vendor_credit` | Modify an existing vendor credit |
 | **Bill Payments** | |
 | `create_bill_payment` | Pay bills and apply vendor credits (the QBO "check" / pay-bills flow) |
+| `receive_payment` | Record a customer payment against open invoices (A/R counterpart to `create_bill_payment`); each line defaults to the invoice's open balance |
+| `create_transfer` | Move money between two of the company's own accounts (bank↔bank, credit-card paydown) |
 | `get_bill_payment` | Fetch a bill payment by ID; flags unapplied amounts |
 | **Delete** | |
 | `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) |
+
+### Naming Vendors, Customers, and Employees
+
+Every write tool that can attribute a line or a header to a name list accepts a
+name and resolves it to an ID, the same way `account_name` and
+`department_name` do. Which parameter you get depends on what QuickBooks will
+actually store there:
+
+| Parameter | Where it applies | Accepts |
+|-----------|------------------|---------|
+| `entity_name` + `entity_type` | `create_deposit` / `edit_deposit` lines, `create_journal_entry` / `edit_journal_entry` lines, `create_expense` / `edit_expense` header payee | Vendor, Customer, or Employee. `entity_type` defaults to `Vendor`. |
+| `customer_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_vendor_credit` / `edit_vendor_credit` lines | Customer only — QuickBooks stores a `CustomerRef` on these lines and has no vendor or employee option. |
+| `vendor_name` | `create_bill`, `create_vendor_credit`, `create_bill_payment` headers | Vendor only. |
+| `customer_name` (header) | `create_invoice`, `create_sales_receipt` | Customer only. Their item lines have no per-line entity. |
+
+Each also has an `_id` form (`entity_id`, `customer_id`) if you already know the
+internal ID. On edit tools, the rule for line parameters is:
+
+- **omit** the parameter and a line addressed by `line_id` keeps the entity it
+  already has;
+- **name** one and it is set or replaced;
+- **pass an empty string** (`entity_name: ""`) and it is cleared.
+
+See [`docs/quickbooks-api-limitations.md`](docs/quickbooks-api-limitations.md#entity-attribution-is-four-different-fields)
+for the underlying QBO field shapes, which are not uniform.
+
+### Parameter Names Are Enforced
+
+Arguments are checked against the schema each tool advertises, before anything
+runs. An unknown parameter is an error that names the closest valid one, a
+missing required parameter is an error, and an `edit_*` call with no field to
+change is an error rather than a write that reports success.
+
+The alternative is silence. A handler reads the parameters it knows about, so a
+misspelled one is simply absent: a create call that puts the date under the
+wrong key posts on today's date, an as-of report asked for a date range returns
+today's balances, and an edit whose fields are all misspelled comes back
+"updated successfully" having changed nothing. None of those raise anything for
+the caller to notice.
+
+Relatedly, when QuickBooks accepts an update without advancing the record's
+`SyncToken` — meaning the payload matched what was already stored — the edit
+tools report no change instead of success.
 
 ---
 
@@ -352,7 +397,15 @@ The server automatically refreshes OAuth tokens on each request and persists the
 npm run dev      # Run in development mode
 npm run build    # Build
 npm run typecheck # Type check
+npm test         # Run the test suite
 ```
+
+Tests live in `tests/`, mirroring `src/`. They are TypeScript, compiled by
+`tsconfig.test.json` into `dist-test/` and run by Node's built-in test runner —
+no test framework dependency. Type errors in a test are build failures, so a
+test referencing a renamed export fails loudly rather than silently skipping.
+Anything needing a QuickBooks client passes a hand-written stand-in covering
+just the calls under test, so the suite runs offline with no credentials.
 
 ---
 

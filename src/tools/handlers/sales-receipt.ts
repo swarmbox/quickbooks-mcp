@@ -3,12 +3,15 @@
 import QuickBooks from "node-quickbooks";
 import {
   promisify,
+  promisifyWrite,
   getAccountCache,
   getDepartmentCache,
   resolveItem,
   resolveCustomer,
+  resolveAccountRef,
+  toQboRef,
 } from "../../client/index.js";
-import { validateAmount, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
 
 interface SalesReceiptLineChange {
   line_id?: string;
@@ -67,13 +70,9 @@ export async function handleCreateSalesReceipt(
   let depositAccountRef: { value: string; name: string } | undefined;
   if (deposit_to_account) {
     const acctCache = await getAccountCache(client);
-    let match = acctCache.byAcctNum.get(deposit_to_account.toLowerCase());
-    if (!match) match = acctCache.byName.get(deposit_to_account.toLowerCase());
-    if (!match) match = acctCache.items.find(a =>
-      a.FullyQualifiedName?.toLowerCase().includes(deposit_to_account.toLowerCase())
+    depositAccountRef = toQboRef(
+      resolveAccountRef(acctCache, deposit_to_account, { label: "Deposit account" })
     );
-    if (!match) throw new Error(`Deposit account not found: "${deposit_to_account}"`);
-    depositAccountRef = { value: match.Id, name: match.FullyQualifiedName || match.Name };
   }
 
   // Resolve department (header-level, optional)
@@ -185,11 +184,11 @@ export async function handleCreateSalesReceipt(
   }
 
   // Create the sales receipt
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createSalesReceipt(srObject, cb)
   ) as { Id: string; DocNumber?: string };
 
-  const qboUrl = `https://app.qbo.intuit.com/app/salesreceipt?txnId=${result.Id}`;
+  const qboUrl = buildQboUrl("salesreceipt", "txnId", result.Id);
 
   const response = [
     "Sales Receipt Created!",
@@ -240,7 +239,7 @@ export async function handleGetSalesReceipt(
       };
     }>;
   };
-  const qboUrl = `https://app.qbo.intuit.com/app/salesreceipt?txnId=${salesReceipt.Id}`;
+  const qboUrl = buildQboUrl("salesreceipt", "txnId", salesReceipt.Id);
 
   // Format summary
   const lines: string[] = [
@@ -285,13 +284,14 @@ export async function handleEditSalesReceipt(
     id: string;
     txn_date?: string;
     memo?: string;
+    customer_name?: string;
     deposit_to_account?: string;
     department_name?: string;
     lines?: SalesReceiptLineChange[];
     draft?: boolean;
   }
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  const { id, txn_date, memo, deposit_to_account, department_name, lines: lineChanges, draft = true } = args;
+  const { id, txn_date, memo, customer_name, deposit_to_account, department_name, lines: lineChanges, draft = true } = args;
 
   // Fetch current SalesReceipt
   const current = await promisify<unknown>((cb) =>
@@ -302,6 +302,7 @@ export async function handleEditSalesReceipt(
     TxnDate: string;
     DocNumber?: string;
     PrivateNote?: string;
+    CustomerRef?: { value: string; name?: string };
     DepositToAccountRef?: { value: string; name?: string };
     DepartmentRef?: { value: string; name?: string };
     Line: Array<{
@@ -320,32 +321,18 @@ export async function handleEditSalesReceipt(
     }>;
   };
 
-  // Determine if we're modifying lines - requires full update (not sparse)
-  const needsFullUpdate = lineChanges && lineChanges.length > 0;
-
-  // Build updated SalesReceipt
+  // Always sparse. A full update nulls every writable field absent from the
+  // payload, which silently cleared CustomerRef on any line edit. Sparse also
+  // handles line changes (including deletion) provided the complete Line array
+  // is sent. See docs/quickbooks-api-limitations.md.
   const updated: Record<string, unknown> = {
     Id: current.Id,
     SyncToken: current.SyncToken,
+    sparse: true,
   };
 
-  // Only use sparse for non-line updates; full update needed for line modifications
-  // Note: node-quickbooks auto-sets sparse=true, so we must explicitly set sparse=false for full updates
-  if (!needsFullUpdate) {
-    updated.sparse = true;
-  } else {
-    // Full update: explicitly set sparse=false (node-quickbooks defaults to true)
-    updated.sparse = false;
-    updated.TxnDate = current.TxnDate;
-    updated.DocNumber = current.DocNumber;
-    updated.PrivateNote = current.PrivateNote;
-    if (current.DepositToAccountRef) {
-      updated.DepositToAccountRef = current.DepositToAccountRef;
-    }
-    if (current.DepartmentRef) {
-      updated.DepartmentRef = current.DepartmentRef;
-    }
-    // Copy lines and strip read-only fields
+  if (lineChanges && lineChanges.length > 0) {
+    // Seed with the existing lines, stripping read-only fields
     updated.Line = current.Line.map(line => {
       const { LineNum, ...rest } = line as Record<string, unknown>;
       return rest;
@@ -355,17 +342,18 @@ export async function handleEditSalesReceipt(
   if (txn_date !== undefined) updated.TxnDate = txn_date;
   if (memo !== undefined) updated.PrivateNote = memo;
 
+  // Resolve customer if provided
+  if (customer_name !== undefined) {
+    updated.CustomerRef = await resolveCustomer(client, customer_name);
+  }
+
   // Resolve deposit_to_account if provided (needs account cache)
   if (deposit_to_account !== undefined) {
     const { getAccountCache } = await import("../../client/index.js");
     const acctCache = await getAccountCache(client);
-    let match = acctCache.byAcctNum.get(deposit_to_account.toLowerCase());
-    if (!match) match = acctCache.byName.get(deposit_to_account.toLowerCase());
-    if (!match) match = acctCache.items.find(a =>
-      a.FullyQualifiedName?.toLowerCase().includes(deposit_to_account.toLowerCase())
+    updated.DepositToAccountRef = toQboRef(
+      resolveAccountRef(acctCache, deposit_to_account, { label: "Deposit account" })
     );
-    if (!match) throw new Error(`Deposit account not found: "${deposit_to_account}"`);
-    updated.DepositToAccountRef = { value: match.Id, name: match.FullyQualifiedName || match.Name };
   }
 
   // Resolve header-level department if provided
@@ -459,7 +447,7 @@ export async function handleEditSalesReceipt(
     updated.Line = finalLines;
   }
 
-  const qboUrl = `https://app.qbo.intuit.com/app/salesreceipt?txnId=${id}`;
+  const qboUrl = buildQboUrl("salesreceipt", "txnId", id);
 
   if (draft) {
     const previewLines: string[] = [
@@ -473,6 +461,10 @@ export async function handleEditSalesReceipt(
 
     if (txn_date !== undefined) previewLines.push(`  Date: ${current.TxnDate} → ${txn_date}`);
     if (memo !== undefined) previewLines.push(`  Memo: ${current.PrivateNote || '(none)'} → ${memo}`);
+    if (customer_name !== undefined) {
+      const newCust = (updated.CustomerRef as { name?: string })?.name || customer_name;
+      previewLines.push(`  Customer: ${current.CustomerRef?.name || '(none)'} → ${newCust}`);
+    }
     if (deposit_to_account !== undefined) {
       const newAcct = (updated.DepositToAccountRef as { name?: string })?.name || deposit_to_account;
       previewLines.push(`  Deposit To: ${current.DepositToAccountRef?.name || '(default)'} → ${newAcct}`);
@@ -503,11 +495,11 @@ export async function handleEditSalesReceipt(
     };
   }
 
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.updateSalesReceipt(updated, cb)
   ) as { Id: string; SyncToken: string };
 
   return {
-    content: [{ type: "text", text: `Sales Receipt ${id} updated successfully.\nNew SyncToken: ${result.SyncToken}\nView in QuickBooks: ${qboUrl}` }],
+    content: [{ type: "text", text: formatUpdateResult("Sales Receipt", id, current.SyncToken, result.SyncToken, qboUrl) }],
   };
 }

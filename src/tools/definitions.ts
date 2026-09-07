@@ -1,5 +1,9 @@
 // Tool definitions for QuickBooks MCP server
 
+// get_report's enum is the catalog itself, so the advertised list and the
+// dispatch can never drift apart.
+import { REPORT_NAMES } from "../reports/catalog.js";
+
 export const toolDefinitions = [
   {
     name: "qbo_authenticate",
@@ -39,7 +43,7 @@ export const toolDefinitions = [
       properties: {
         query: {
           type: "string",
-          description: "The SQL-like query string. Common entities: Customer, Vendor, Invoice, Bill, Account, Item, Department, JournalEntry, Purchase, Payment, SalesReceipt, Deposit. Add MAXRESULTS N to limit results (default: 1000). Note: Most transaction fields (DepartmentRef, AccountRef, Line) are not filterable. Error responses include valid filterable fields for the entity. Use query_account_transactions for account/department filtering.",
+          description: "The SQL-like query string, e.g. SELECT * FROM Bill WHERE TxnDate >= '2026-01-01'. Any queryable QBO entity works. Add MAXRESULTS N to limit results (default: 1000). Most transaction fields (DepartmentRef, AccountRef, Line) are not filterable; errors list the valid ones. Use query_account_transactions to filter by account or department.",
         },
       },
       required: ["query"],
@@ -89,6 +93,20 @@ export const toolDefinitions = [
           type: "string",
           description: "Accounting method: 'Accrual' (default) or 'Cash'",
         },
+        detail_level: {
+          type: "string",
+          enum: ["summary", "account"],
+          description: "'summary' (default) returns section totals only. 'account' also lists each account with its balance, so you do not have to open the full report file.",
+        },
+        columns: {
+          type: "string",
+          enum: ["total", "all"],
+          description: "'total' (default) shows only the total column. 'all' renders every column as a table — use with summarize_by to see per-department (or per-month) values, which are otherwise absent from the rendered output.",
+        },
+        include_raw: {
+          type: "boolean",
+          description: "Append the full raw report payload. Off by default: the rendered summary already carries the numbers, and the raw copy roughly doubles the response. Only needed for fields the summary does not render.",
+        },
       },
       required: [],
     },
@@ -115,8 +133,88 @@ export const toolDefinitions = [
           type: "string",
           description: "Accounting method: 'Accrual' (default) or 'Cash'",
         },
+        detail_level: {
+          type: "string",
+          enum: ["summary", "account"],
+          description: "'summary' (default) returns section totals only. 'account' also lists each account with its balance, so you do not have to open the full report file.",
+        },
+        columns: {
+          type: "string",
+          enum: ["total", "all"],
+          description: "'total' (default) shows only the total column. 'all' renders every column as a table — use with summarize_by to see per-department (or per-month) values, which are otherwise absent from the rendered output.",
+        },
+        include_raw: {
+          type: "boolean",
+          description: "Append the full raw report payload. Off by default: the rendered summary already carries the numbers, and the raw copy roughly doubles the response. Only needed for fields the summary does not render.",
+        },
       },
       required: [],
+    },
+  },
+  {
+    name: "get_report",
+    description: "Run a QuickBooks report that has no dedicated tool: A/R and A/P aging, customer and vendor balances, transaction lists, general ledger, journal, sales by customer/item/class/department, cash flow, and detail variants. Answers what is outstanding and how old it is, which the entity query tools cannot — a report sees postings that carry no account reference in entity JSON. Profit and Loss, Balance Sheet and Trial Balance have their own tools.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        report: {
+          type: "string",
+          enum: REPORT_NAMES,
+          description: "QuickBooks' own spelling ('AgedPayables') is accepted too.",
+        },
+        start_date: {
+          type: "string",
+          description: "YYYY-MM-DD. Range reports only.",
+        },
+        end_date: {
+          type: "string",
+          description: "YYYY-MM-DD.",
+        },
+        report_date: {
+          type: "string",
+          description: "YYYY-MM-DD as-of date for the aging, balance and inventory reports; rejected on the rest.",
+        },
+        date_macro: {
+          type: "string",
+          description: "Named period instead of dates, e.g. 'Last Month'.",
+        },
+        accounting_method: {
+          type: "string",
+          enum: ["Accrual", "Cash"],
+          description: "Default Accrual.",
+        },
+        summarize_by: {
+          type: "string",
+          enum: ["Total", "Month", "Week", "Days", "Quarter", "Year", "Customers", "Vendors", "Classes", "Departments", "Employees", "ProductsAndServices"],
+          description: "Column breakdown, where the report supports it.",
+        },
+        department: {
+          type: "string",
+          description: "Department/location name or ID.",
+        },
+        customer: {
+          type: "string",
+          description: "Customer name or ID.",
+        },
+        vendor: {
+          type: "string",
+          description: "Vendor name or ID.",
+        },
+        detail_level: {
+          type: "string",
+          enum: ["summary", "full"],
+          description: "'summary' (default) prints section headers and subtotals; 'full' adds the leaf rows nested under them, which on a detail report is thousands. Top-level rows always print, so a flat report is complete at 'summary'.",
+        },
+        max_rows: {
+          type: "number",
+          description: "Rendered row cap, default 200, max 2000.",
+        },
+        include_raw: {
+          type: "boolean",
+          description: "Append the raw report payload. Off by default; the table already carries the numbers.",
+        },
+      },
+      required: ["report"],
     },
   },
   {
@@ -137,13 +235,21 @@ export const toolDefinitions = [
           type: "string",
           description: "Accounting method: 'Accrual' (default) or 'Cash'",
         },
+        flags: {
+          type: "boolean",
+          description: "If true, append a close-review pass over the report: accounts carrying a balance on the wrong side (an asset or expense with a credit, a liability/equity/income with a debit), and uncategorized/suspense accounts that still hold a balance. Contra accounts named as such (accumulated depreciation, allowance accounts) are checked against their inverted normal side rather than skipped; retained earnings and contra-by-subtype-only accounts are left unchecked. Default false.",
+        },
+        include_raw: {
+          type: "boolean",
+          description: "Append the full raw report payload. Off by default: the rendered account/debit/credit table already carries the numbers, and the raw copy roughly doubles the response.",
+        },
       },
       required: [],
     },
   },
   {
     name: "query_account_transactions",
-    description: "Query all transactions affecting a specific account. Searches across JournalEntry, Purchase, Deposit, SalesReceipt, Bill, Invoice, and Payment. Returns consolidated list with date, type, amount (debit/credit), and description. Useful for investigating account balance discrepancies.",
+    description: "Query all transactions affecting a specific account, across all 13 posting transaction types. Returns a consolidated list with date, type, amount (debit/credit), and description. Useful for investigating account balance discrepancies. Note: the A/R side of invoices, credit memos, and payments has no account reference in QBO's data model and cannot appear here — use account_period_summary for A/R totals.",
     inputSchema: {
       type: "object",
       properties: {
@@ -162,6 +268,18 @@ export const toolDefinitions = [
         department: {
           type: "string",
           description: "Filter to specific department/location (optional)"
+        },
+        offset: {
+          type: "number",
+          description: "Skip this many transactions (default: 0). Page through long results using the offset the previous call reports."
+        },
+        limit: {
+          type: "number",
+          description: "Max transactions returned in detail. Totals always cover the whole period regardless of this."
+        },
+        include_subaccounts: {
+          type: "boolean",
+          description: "Also match transactions posting to sub-accounts of this account (default: false). Needed to reconcile against account_period_summary, which always rolls sub-accounts into the parent."
         }
       },
       required: ["account"]
@@ -199,7 +317,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_journal_entry",
-    description: "Create a journal entry. Accepts account/department names (will lookup IDs automatically). Validates debits=credits before creating. Returns entry details and a link to view in QuickBooks.",
+    description: "Create a journal entry. Accepts account/department/entity names (will lookup IDs automatically). Validates debits=credits before creating. Lines may carry an entity (vendor, customer, or employee) — QuickBooks requires one on any line posting to Accounts Receivable or Accounts Payable. Returns entry details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -246,6 +364,19 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description (optional)",
               },
+              entity_name: {
+                type: "string",
+                description: "Name of the vendor, customer, or employee this line is attributed to (e.g., 'Acme Supply Co'). Sets JournalEntryLineDetail.Entity. Required by QuickBooks on lines posting to A/R or A/P.",
+              },
+              entity_id: {
+                type: "string",
+                description: "Entity ID (use if you already know it, otherwise use entity_name)",
+              },
+              entity_type: {
+                type: "string",
+                enum: ["Vendor", "Customer", "Employee"],
+                description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
+              },
             },
             required: ["amount", "posting_type"],
           },
@@ -278,7 +409,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_journal_entry",
-    description: "Modify an existing journal entry. Can update date, memo, doc_number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line, set delete=true to remove a line. Validates debits=credits before saving.",
+    description: "Modify an existing journal entry. Can update date, memo, doc_number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line, set delete=true to remove a line. A line_id preserves the line's existing entity unless entity_name/entity_id is given; pass entity_name: \"\" to clear it. Validates debits=credits before saving.",
     inputSchema: {
       type: "object",
       properties: {
@@ -329,6 +460,19 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description",
               },
+              entity_name: {
+                type: "string",
+                description: "Name of the vendor, customer, or employee this line is attributed to (auto-resolved to ID). Omit to keep the line's current entity; pass \"\" to clear it.",
+              },
+              entity_id: {
+                type: "string",
+                description: "Entity ID (use if you already know it, otherwise use entity_name)",
+              },
+              entity_type: {
+                type: "string",
+                enum: ["Vendor", "Customer", "Employee"],
+                description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
+              },
               delete: {
                 type: "boolean",
                 description: "Set true to remove this line (requires line_id)",
@@ -376,7 +520,7 @@ export const toolDefinitions = [
         },
         ap_account: {
           type: "string",
-          description: "Accounts Payable account name or number (optional, defaults to standard AP)",
+          description: "Accounts Payable account name or number (optional, defaults to standard AP). Only Accounts Payable-type accounts are matched.",
         },
         memo: {
           type: "string",
@@ -388,7 +532,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Array of expense line items. Provide account_name OR account_id (name preferred).",
+          description: "Array of expense line items. Provide account_name OR account_id (name preferred). Optionally provide class_name OR class_id for per-line Class tracking, and customer_name OR customer_id to attribute the line to a customer.",
           items: {
             type: "object",
             properties: {
@@ -407,6 +551,22 @@ export const toolDefinitions = [
               description: {
                 type: "string",
                 description: "Line description (optional)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., '5614', 'Parent:Child'). Will be looked up to get ID. QBO Class tracking, distinct from header-level Department/Location.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
+              },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Sets AccountBasedExpenseLineDetail.CustomerRef. Bill lines accept a customer only — the vendor is the header vendor_name. The line is marked NotBillable; these tools attribute cost, they do not queue it for re-invoicing.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
               },
             },
             required: ["amount"],
@@ -436,7 +596,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_bill",
-    description: "Modify an existing bill. Can update vendor, date, due date, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. Note: DepartmentRef is header-level only — lines do not support department.",
+    description: "Modify an existing bill. Can update vendor, date, due date, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
     inputSchema: {
       type: "object",
       properties: {
@@ -490,6 +650,22 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description",
               },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., '5614'), auto-resolved to ID. Sets/changes per-line QBO Class tracking. Existing class is preserved if omitted.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
+              },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Omit to keep the line's current customer; pass \"\" to clear it. Bill lines accept a customer only — the vendor is the header vendor_name.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
               delete: {
                 type: "boolean",
                 description: "Set true to remove this line (requires line_id)",
@@ -521,7 +697,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_expense",
-    description: "Modify an existing expense (Purchase). Can update date, memo, payment account, and/or lines. Note: PaymentType (Cash/Check/CreditCard) cannot be changed after creation.",
+    description: "Modify an existing expense (Purchase). Can update date, memo, payment account, payee, and/or lines. The payee may be a vendor, customer, or employee — set entity_type to say which (defaults to Vendor). Note: PaymentType (Cash/Check/CreditCard) cannot be changed after creation.",
     inputSchema: {
       type: "object",
       properties: {
@@ -563,6 +739,14 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description",
               },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Omit to keep the line's current customer; pass \"\" to clear it. Expense lines accept a customer only — the payee is the header entity_name.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
               delete: {
                 type: "boolean",
                 description: "Set true to remove this line (requires line_id)",
@@ -576,11 +760,16 @@ export const toolDefinitions = [
         },
         entity_name: {
           type: "string",
-          description: "Payee/vendor display name (e.g., 'Cozzini Bros., Inc.'). Will be looked up to get ID.",
+          description: "Payee display name. Will be looked up to get ID; use entity_type to say which name list it belongs to.",
         },
         entity_id: {
           type: "string",
-          description: "Payee/vendor ID (use if you already know it, otherwise use entity_name)",
+          description: "Payee ID (use if you already know it, otherwise use entity_name)",
+        },
+        entity_type: {
+          type: "string",
+          enum: ["Vendor", "Customer", "Employee"],
+          description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
         },
         draft: {
           type: "boolean",
@@ -592,7 +781,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_expense",
-    description: "Create an expense (Purchase). Accepts account/department/vendor names (will lookup IDs automatically). Covers Cash, Check, and Credit Card payment types. Note: PaymentType cannot be changed after creation. DepartmentRef is header-level only. Returns expense details and a link to view in QuickBooks.",
+    description: "Create an expense (Purchase). Accepts account/department/payee names (will lookup IDs automatically). Covers Cash, Check, and Credit Card payment types. The payee may be a vendor, customer, or employee — set entity_type to say which (defaults to Vendor). Note: PaymentType cannot be changed after creation. DepartmentRef is header-level only. Returns expense details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -611,11 +800,16 @@ export const toolDefinitions = [
         },
         entity_name: {
           type: "string",
-          description: "Payee/vendor display name (e.g., 'Simplisafe', 'PG&E'). Will be looked up to get ID.",
+          description: "Payee display name (e.g., 'Acme Supply Co'). Will be looked up to get ID; use entity_type to say which name list it belongs to.",
         },
         entity_id: {
           type: "string",
-          description: "Payee/vendor ID (use if you already know it, otherwise use entity_name)",
+          description: "Payee ID (use if you already know it, otherwise use entity_name)",
+        },
+        entity_type: {
+          type: "string",
+          enum: ["Vendor", "Customer", "Employee"],
+          description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
         },
         department_name: {
           type: "string",
@@ -635,7 +829,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Array of expense line items. Provide account_name OR account_id (name preferred).",
+          description: "Array of expense line items. Provide account_name OR account_id (name preferred). Optionally provide customer_name OR customer_id to attribute the line to a customer.",
           items: {
             type: "object",
             properties: {
@@ -654,6 +848,14 @@ export const toolDefinitions = [
               description: {
                 type: "string",
                 description: "Line description (optional)",
+              },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Sets AccountBasedExpenseLineDetail.CustomerRef. Expense lines accept a customer only — the payee is the header entity_name. The line is marked NotBillable; these tools attribute cost, they do not queue it for re-invoicing.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
               },
             },
             required: ["amount"],
@@ -683,7 +885,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_sales_receipt",
-    description: "Modify an existing sales receipt. Can update date, memo, deposit account, department, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires item_name), set delete=true to remove.",
+    description: "Modify an existing sales receipt. Can update date, memo, customer, deposit account, department, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires item_name), set delete=true to remove.",
     inputSchema: {
       type: "object",
       properties: {
@@ -698,6 +900,10 @@ export const toolDefinitions = [
         memo: {
           type: "string",
           description: "New private memo (optional)",
+        },
+        customer_name: {
+          type: "string",
+          description: "Customer name (auto-resolved to ID). Also used to restore a customer that was cleared by an earlier edit.",
         },
         deposit_to_account: {
           type: "string",
@@ -1051,7 +1257,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_deposit",
-    description: "Create a bank deposit. Accepts account/department/vendor names (will lookup IDs automatically). Lines represent the sources of the deposit — amounts can be positive (income) or negative (fees, deductions). QuickBooks computes the total from line amounts. Returns deposit details and a link to view in QuickBooks.",
+    description: "Create a bank deposit. Accepts account/department/entity names (will lookup IDs automatically). Lines represent the sources of the deposit — amounts can be positive (income) or negative (fees, deductions). Each line may name the vendor, customer, or employee it came from via entity_name/entity_type. QuickBooks computes the total from line amounts. Returns deposit details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1087,11 +1293,16 @@ export const toolDefinitions = [
               },
               entity_name: {
                 type: "string",
-                description: "Vendor or customer name (e.g., 'Square Inc.'). Sets Entity on the deposit line. Will be looked up to get ID.",
+                description: "Name of the vendor, customer, or employee the line came from (e.g., 'Acme Supply Co'). Sets DepositLineDetail.Entity. Will be looked up to get ID.",
               },
               entity_id: {
                 type: "string",
                 description: "Entity ID (use if you already know it, otherwise use entity_name)",
+              },
+              entity_type: {
+                type: "string",
+                enum: ["Vendor", "Customer", "Employee"],
+                description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
               },
             },
             required: ["amount"],
@@ -1133,7 +1344,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_deposit",
-    description: "Modify an existing deposit. Can update date, memo, deposit account, department, and/or lines. CRITICAL for line changes: The QB Deposit API does NOT replace lines - it merges them. Lines WITH line_id update existing lines. Lines WITHOUT line_id are ADDED as new. Lines NOT included are KEPT unchanged. To 'delete' a line, you must include ALL existing lines with their line_ids and set unwanted lines to amount: 0. Line amounts must sum to the original deposit total (use expected_total to override for corrupted deposits).",
+    description: "Modify an existing deposit. Can update date, memo, deposit account, department, and/or lines. CRITICAL for line changes: The QB Deposit API does NOT replace lines - it merges them. Lines WITH line_id update existing lines. Lines WITHOUT line_id are ADDED as new. Lines NOT included are KEPT unchanged. To 'delete' a line, you must include ALL existing lines with their line_ids and set unwanted lines to amount: 0. Line amounts must sum to the original deposit total (use expected_total to override for corrupted deposits). Entity (vendor/customer/employee) can be set on any line, new or existing, via entity_name/entity_type; a line_id with no entity input keeps whatever entity the line already had.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1165,7 +1376,7 @@ export const toolDefinitions = [
             properties: {
               line_id: {
                 type: "string",
-                description: "ID of existing line to update (preserves Entity/Vendor reference). Omit to create new line.",
+                description: "ID of existing line to update (preserves the line's Entity reference unless entity_name/entity_id is given). Omit to create new line.",
               },
               amount: {
                 type: "number",
@@ -1178,6 +1389,19 @@ export const toolDefinitions = [
               description: {
                 type: "string",
                 description: "Line description",
+              },
+              entity_name: {
+                type: "string",
+                description: "Name of the vendor, customer, or employee the line came from (auto-resolved to ID). Sets DepositLineDetail.Entity on new and existing lines alike. Omit to keep the line's current entity; pass \"\" to clear it.",
+              },
+              entity_id: {
+                type: "string",
+                description: "Entity ID (use if you already know it, otherwise use entity_name)",
+              },
+              entity_type: {
+                type: "string",
+                enum: ["Vendor", "Customer", "Employee"],
+                description: "Which name list entity_name/entity_id refers to. Defaults to Vendor.",
               },
             },
             required: ["amount", "account_name"],
@@ -1223,7 +1447,7 @@ export const toolDefinitions = [
         },
         ap_account: {
           type: "string",
-          description: "Accounts Payable account name or number (optional, defaults to standard AP)",
+          description: "Accounts Payable account name or number (optional, defaults to standard AP). Only Accounts Payable-type accounts are matched.",
         },
         memo: {
           type: "string",
@@ -1255,6 +1479,14 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description (optional)",
               },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Sets AccountBasedExpenseLineDetail.CustomerRef. Vendor credit lines accept a customer only — the vendor is the header vendor_name. The line is marked NotBillable.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
             },
             required: ["amount"],
           },
@@ -1283,7 +1515,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_vendor_credit",
-    description: "Modify an existing vendor credit. Can update vendor, date, memo, ref number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires amount and account_name), set delete=true to remove. Note: DepartmentRef is header-level only — lines do not support department.",
+    description: "Modify an existing vendor credit. Can update vendor, date, memo, ref number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires amount and account_name), set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1329,6 +1561,14 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description",
               },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Omit to keep the line's current customer; pass \"\" to clear it. Vendor credit lines accept a customer only — the vendor is the header vendor_name.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
               delete: {
                 type: "boolean",
                 description: "Set true to remove this line (requires line_id)",
@@ -1360,7 +1600,7 @@ export const toolDefinitions = [
         },
         payment_account: {
           type: "string",
-          description: "Bank account name or number the payment is drawn from (e.g., 'PLAT BUS CHECKING', '5752'). Will be looked up to get ID.",
+          description: "Bank account name or number the payment is drawn from (e.g., 'PLAT BUS CHECKING', '5752'). Only Bank-type accounts are matched, so a partial name cannot resolve to an expense or liability account.",
         },
         txn_date: {
           type: "string",
@@ -1416,6 +1656,98 @@ export const toolDefinitions = [
         },
       },
       required: ["payment_account", "txn_date", "bills"],
+    },
+  },
+  {
+    name: "create_transfer",
+    description: "Move money between two of the company's own accounts (QuickBooks 'Transfer') — bank to bank, or a credit-card paydown. Use this rather than create_expense, which would book the outflow as an expense and never touch the receiving account, or create_journal_entry, which posts the right result but does not read as a transfer in the register or the bank-feed match screen. Defaults to draft: true for a preview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        from_account: {
+          type: "string",
+          description: "Account the money leaves. Bank or Credit Card only — name, number, or ID.",
+        },
+        to_account: {
+          type: "string",
+          description: "Account the money arrives in. Bank or Credit Card only — name, number, or ID.",
+        },
+        amount: {
+          type: "number",
+          description: "Amount to move. Must be positive; reverse the accounts rather than passing a negative.",
+        },
+        txn_date: {
+          type: "string",
+          description: "Transfer date, YYYY-MM-DD.",
+        },
+        private_note: {
+          type: "string",
+          description: "Private note on the transfer.",
+        },
+        draft: {
+          type: "boolean",
+          description: "Preview without recording. Default true.",
+        },
+      },
+      required: ["from_account", "to_account", "amount", "txn_date"],
+    },
+  },
+  {
+    name: "receive_payment",
+    description: "Record a customer payment against one or more open invoices (QuickBooks 'Receive Payment'), clearing Accounts Receivable. This is the A/R counterpart to create_bill_payment. Not a deposit — create_deposit banks money without settling an invoice — and not a sales receipt, which records a sale that was paid outright and never had an invoice. Defaults to draft: true for a preview.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        customer_name: {
+          type: "string",
+          description: "Customer display name. Either this or customer_id.",
+        },
+        customer_id: {
+          type: "string",
+          description: "Customer ID. Either this or customer_name.",
+        },
+        invoices: {
+          type: "array",
+          description: "Invoices to settle. Each amount defaults to that invoice's open balance, so the common case needs only the id.",
+          items: {
+            type: "object",
+            properties: {
+              invoice_id: { type: "string", description: "Invoice ID" },
+              amount: { type: "number", description: "Amount to apply. Defaults to the open balance; may not exceed it." },
+            },
+            required: ["invoice_id"],
+          },
+        },
+        txn_date: {
+          type: "string",
+          description: "Payment date, YYYY-MM-DD.",
+        },
+        deposit_to_account: {
+          type: "string",
+          description: "Bank account, or Undeposited Funds. Omit to let QuickBooks use its own default, which is normally Undeposited Funds.",
+        },
+        amount: {
+          type: "number",
+          description: "Payment total. Defaults to the sum applied to invoices. A larger figure is allowed and leaves the difference as an unapplied credit on the customer; a smaller one is rejected.",
+        },
+        payment_method: {
+          type: "string",
+          description: "Payment method name or ID, e.g. 'Check', 'Cash', 'EFT'.",
+        },
+        reference_no: {
+          type: "string",
+          description: "Check number or ACH reference.",
+        },
+        memo: {
+          type: "string",
+          description: "Private note on the payment.",
+        },
+        draft: {
+          type: "boolean",
+          description: "Preview without recording. Default true — shows each invoice's open balance, what is being applied, and what remains.",
+        },
+      },
+      required: ["invoices", "txn_date"],
     },
   },
   {

@@ -1,8 +1,8 @@
 // Handlers for customer tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
-import { promisify, resolveCustomer } from "../../client/index.js";
-import { outputReport } from "../../utils/index.js";
+import { promisify, promisifyWrite, resolveCustomer } from "../../client/index.js";
+import { buildQboUrl, outputReport, formatUpdateResult } from "../../utils/index.js";
 
 interface AddressInput {
   line1?: string;
@@ -199,11 +199,11 @@ export async function handleCreateCustomer(
     return { content: [{ type: "text", text: preview }] };
   }
 
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.createCustomer(customerObj, cb)
   ) as QBCustomer;
 
-  const qboUrl = `https://app.qbo.intuit.com/app/customerdetail?nameId=${result.Id}`;
+  const qboUrl = buildQboUrl("customerdetail", "nameId", result.Id);
 
   const response = [
     "Customer Created!",
@@ -227,7 +227,7 @@ export async function handleGetCustomer(
     client.getCustomer(id, cb)
   ) as QBCustomer;
 
-  const qboUrl = `https://app.qbo.intuit.com/app/customerdetail?nameId=${customer.Id}`;
+  const qboUrl = buildQboUrl("customerdetail", "nameId", customer.Id);
 
   const lines: string[] = [
     "Customer",
@@ -353,7 +353,7 @@ export async function handleEditCustomer(
     updated.SalesTermRef = { value: match.Id, name: match.Name };
   }
 
-  const qboUrl = `https://app.qbo.intuit.com/app/customerdetail?nameId=${id}`;
+  const qboUrl = buildQboUrl("customerdetail", "nameId", id);
 
   if (draft) {
     const previewLines: string[] = [
@@ -397,14 +397,14 @@ export async function handleEditCustomer(
     return { content: [{ type: "text", text: previewLines.join("\n") }] };
   }
 
-  const result = await promisify<unknown>((cb) =>
+  const result = await promisifyWrite<unknown>((cb) =>
     client.updateCustomer(updated, cb)
   ) as QBCustomer;
 
   return {
     content: [{
       type: "text",
-      text: `Customer ${id} updated successfully.\nNew SyncToken: ${result.SyncToken}\nView in QuickBooks: ${qboUrl}`,
+      text: formatUpdateResult("Customer", id, current.SyncToken, result.SyncToken, qboUrl),
     }],
   };
 }

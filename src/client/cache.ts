@@ -5,12 +5,16 @@ import { promisify } from "./promisify.js";
 import {
   CachedAccount,
   CachedCustomer,
+  CachedClass,
   CachedDepartment,
   CachedVendor,
+  CachedEmployee,
   CachedItem,
   AccountCache,
+  ClassCache,
   DepartmentCache,
   VendorCache,
+  EmployeeCache,
   QBQueryResponse,
 } from "../types/index.js";
 
@@ -19,8 +23,10 @@ const LOOKUP_CACHE_TTL_MS = 15 * 60 * 1000;
 
 // Module-level cache state
 let departmentCache: DepartmentCache | null = null;
+let classCache: ClassCache | null = null;
 let accountCache: AccountCache | null = null;
 let vendorCache: VendorCache | null = null;
+let employeeCache: EmployeeCache | null = null;
 // Item cache: lazy per-entry lookup (not bulk-loaded like others)
 const itemCacheById = new Map<string, CachedItem>();
 const itemCacheByName = new Map<string, CachedItem>(); // lowercase key
@@ -30,8 +36,10 @@ const customerCacheByName = new Map<string, CachedCustomer>(); // lowercase key
 
 export function clearLookupCache(): void {
   departmentCache = null;
+  classCache = null;
   accountCache = null;
   vendorCache = null;
+  employeeCache = null;
   itemCacheById.clear();
   itemCacheByName.clear();
   customerCacheById.clear();
@@ -62,6 +70,30 @@ export async function getDepartmentCache(client: QuickBooks): Promise<Department
 
   departmentCache = { items, byId, byName, fetchedAt: Date.now() };
   return departmentCache;
+}
+
+export async function getClassCache(client: QuickBooks): Promise<ClassCache> {
+  if (classCache && (Date.now() - classCache.fetchedAt) < LOOKUP_CACHE_TTL_MS) {
+    return classCache;
+  }
+
+  const result = await promisify<unknown>((cb) => client.findClasses({ fetchAll: true }, cb));
+  const items = extractQueryResults<CachedClass>(result, 'Class');
+
+  const byId = new Map<string, CachedClass>();
+  const byName = new Map<string, CachedClass>();
+  for (const cls of items) {
+    byId.set(cls.Id, cls);
+    // Index by both the leaf Name and the FullyQualifiedName ("Parent:Child") so
+    // nested classes resolve by either form.
+    byName.set(cls.Name.toLowerCase(), cls);
+    if (cls.FullyQualifiedName) {
+      byName.set(cls.FullyQualifiedName.toLowerCase(), cls);
+    }
+  }
+
+  classCache = { items, byId, byName, fetchedAt: Date.now() };
+  return classCache;
 }
 
 export async function getAccountCache(client: QuickBooks): Promise<AccountCache> {
@@ -129,6 +161,30 @@ export async function getVendorCache(client: QuickBooks): Promise<VendorCache> {
 
   vendorCache = { items, byId, byName, fetchedAt: Date.now() };
   return vendorCache;
+}
+
+export async function getEmployeeCache(client: QuickBooks): Promise<EmployeeCache> {
+  if (employeeCache && (Date.now() - employeeCache.fetchedAt) < LOOKUP_CACHE_TTL_MS) {
+    return employeeCache;
+  }
+
+  const result = await promisify<unknown>((cb) => client.findEmployees({ fetchAll: true }, cb));
+  const items = extractQueryResults<CachedEmployee>(result, 'Employee');
+
+  const byId = new Map<string, CachedEmployee>();
+  const byName = new Map<string, CachedEmployee>();
+  for (const employee of items) {
+    byId.set(employee.Id, employee);
+    // QBO synthesises DisplayName from the name parts, but a payroll-only
+    // employee record can come back without one — skip rather than key on
+    // undefined.
+    if (employee.DisplayName) {
+      byName.set(employee.DisplayName.toLowerCase(), employee);
+    }
+  }
+
+  employeeCache = { items, byId, byName, fetchedAt: Date.now() };
+  return employeeCache;
 }
 
 // Resolve vendor by name or ID using cache
@@ -245,7 +301,19 @@ export async function resolveCustomer(client: QuickBooks, nameOrId: string): Pro
   );
   let customers = extractQueryResults<{ Id: string; DisplayName: string; Active?: boolean }>(result, 'Customer');
 
-  // If no exact match, try LIKE for partial matching
+  // Then by Id. Every caller advertises "name or ID" and the miss below says so
+  // too, but nothing here ever queried Id: a cold lookup by id only worked if
+  // that customer happened to have been resolved by name earlier in the session
+  // and was still cached. Tried after the exact-name match so a customer
+  // literally named "42" still wins its own name.
+  if (customers.length === 0 && /^\d+$/.test(nameOrId.trim())) {
+    const byId = await promisify<unknown>((cb) =>
+      client.findCustomers([{ field: 'Id', value: nameOrId.trim(), operator: '=' }], cb)
+    );
+    customers = extractQueryResults<typeof customers[0]>(byId, 'Customer');
+  }
+
+  // If still nothing, try LIKE for partial matching
   if (customers.length === 0) {
     const partialResult = await promisify<unknown>((cb) =>
       client.findCustomers([
@@ -272,4 +340,34 @@ export async function resolveCustomer(client: QuickBooks, nameOrId: string): Pro
   customerCacheByName.set(customer.DisplayName.toLowerCase(), entry);
 
   return { value: customer.Id, name: customer.DisplayName };
+}
+
+/**
+ * An account plus every account nested beneath it, by Id.
+ *
+ * Report-based tools (the General Ledger behind account_period_summary) roll
+ * sub-account activity up into the parent, while entity-based reads match a
+ * single AccountRef. Callers that want to agree with the reports need the whole
+ * subtree. QBO nests arbitrarily deep, so this walks rather than checking
+ * ParentRef one level down.
+ */
+export function collectAccountTree(cache: AccountCache, rootId: string): Set<string> {
+  const childrenByParent = new Map<string, string[]>();
+  for (const account of cache.items) {
+    const parentId = account.ParentRef?.value;
+    if (!parentId) continue;
+    const siblings = childrenByParent.get(parentId);
+    if (siblings) siblings.push(account.Id);
+    else childrenByParent.set(parentId, [account.Id]);
+  }
+
+  const ids = new Set<string>();
+  const pending = [rootId];
+  while (pending.length > 0) {
+    const id = pending.pop()!;
+    if (ids.has(id)) continue; // also guards against a cyclic ParentRef
+    ids.add(id);
+    for (const childId of childrenByParent.get(id) ?? []) pending.push(childId);
+  }
+  return ids;
 }
