@@ -226,3 +226,90 @@ describe("suggestClosest", () => {
     assert.equal(suggestClosest("aaa_z", valid), suggestClosest("aaa_z", [...valid].reverse()));
   });
 });
+
+// Item and class line parameters on the bill and expense write tools.
+//
+// These assert schema STRUCTURE rather than counting identifiers in the file:
+// item_name and class_name already appear many times across the invoice,
+// sales-receipt and bill schemas, each declaration spanning a property key, its
+// sibling *_id description, and a lines or tool-level description. Any exact
+// count would either fail a compliant implementation or reward skipping the
+// description updates.
+
+function lineProperties(toolName: string): Record<string, unknown> {
+  const schema = schemaFor(toolName) as unknown as {
+    properties: { lines: { items: { properties: Record<string, unknown> } } };
+  };
+  return schema.properties.lines.items.properties;
+}
+
+function lineRequired(toolName: string): string[] | undefined {
+  const schema = schemaFor(toolName) as unknown as {
+    properties: { lines: { items: { required?: string[] } } };
+  };
+  return schema.properties.lines.items.required;
+}
+
+const ITEM_LINE_TOOLS = ["create_bill", "edit_bill", "create_expense", "edit_expense"];
+const EXPENSE_TOOLS = ["create_expense", "edit_expense"];
+
+describe("item and class line parameters", () => {
+  for (const tool of ITEM_LINE_TOOLS) {
+    it(`${tool} declares item_name, item_id, qty and unit_price on its lines`, () => {
+      const props = lineProperties(tool);
+      for (const key of ["item_name", "item_id", "qty", "unit_price"]) {
+        assert.ok(key in props, `${tool} line schema is missing ${key}`);
+      }
+    });
+  }
+
+  for (const tool of EXPENSE_TOOLS) {
+    it(`${tool} declares class_name and class_id on its lines`, () => {
+      const props = lineProperties(tool);
+      for (const key of ["class_name", "class_id"]) {
+        assert.ok(key in props, `${tool} line schema is missing ${key}`);
+      }
+    });
+  }
+
+  it("drops the amount requirement where qty + unit_price is an alternative", () => {
+    // A line may give amount, OR both qty and unit_price; the handler enforces
+    // that pair, so the schema cannot demand amount outright.
+    for (const tool of ["create_bill", "create_expense"]) {
+      assert.ok(
+        !(lineRequired(tool) ?? []).includes("amount"),
+        `${tool} still requires amount on a line`
+      );
+    }
+  });
+
+  it("leaves the amount requirement alone on the tools out of scope", () => {
+    // create_deposit and create_vendor_credit carry the same literal and are
+    // deliberately untouched — a whole-file grep would have swept them up.
+    for (const tool of ["create_deposit", "create_vendor_credit"]) {
+      assert.ok(
+        (lineRequired(tool) ?? []).includes("amount"),
+        `${tool} lost its amount requirement`
+      );
+    }
+  });
+
+  it("accepts a bill line carrying an item and a class", () => {
+    assert.doesNotThrow(() =>
+      check("create_bill", {
+        vendor_name: "Acme Supply Co",
+        txn_date: "2026-01-31",
+        lines: [{ item_name: "Widget", class_name: "North", amount: 100.0 }],
+      })
+    );
+  });
+
+  it("still rejects an undeclared key on a bill line", () => {
+    const message = rejection("create_bill", {
+      vendor_name: "Acme Supply Co",
+      txn_date: "2026-01-31",
+      lines: [{ item_name: "Widget", itm_class: "North", amount: 100.0 }],
+    });
+    assert.match(message, /itm_class/);
+  });
+});

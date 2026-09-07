@@ -532,7 +532,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Array of expense line items. Provide account_name OR account_id (name preferred). Optionally provide class_name OR class_id for per-line Class tracking, and customer_name OR customer_id to attribute the line to a customer.",
+          description: "Array of expense line items. Provide account_name OR account_id (name preferred), or item_name OR item_id to post the line against an Item instead — the two are mutually exclusive. Optionally provide qty and unit_price for an item line, class_name OR class_id for per-line Class tracking, and customer_name OR customer_id to attribute the line to a customer.",
           items: {
             type: "object",
             properties: {
@@ -552,6 +552,22 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description (optional)",
               },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name. Posts the line against an Item (ItemBasedExpenseLineDetail) instead of a GL account. Mutually exclusive with account_name/account_id — a line is one or the other.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (use if you already know it, otherwise use item_name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
+              },
               class_name: {
                 type: "string",
                 description: "Class name for this line (e.g., '5614', 'Parent:Child'). Will be looked up to get ID. QBO Class tracking, distinct from header-level Department/Location.",
@@ -569,7 +585,6 @@ export const toolDefinitions = [
                 description: "Customer ID (use if you already know it, otherwise use customer_name)",
               },
             },
-            required: ["amount"],
           },
         },
         draft: {
@@ -630,7 +645,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Line modifications. Provide line_id to update existing, omit to add new.",
+          description: "Line modifications. Provide line_id to update existing, omit to add new. A line may post against an Item — give item_name in place of account_name, with optional qty and unit_price.",
           items: {
             type: "object",
             properties: {
@@ -649,6 +664,22 @@ export const toolDefinitions = [
               description: {
                 type: "string",
                 description: "Line description",
+              },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name for an item-based line (auto-resolved to ID). Omit to keep the line's current item; pass \"\" together with account_name to convert the line to an account-based one. Mutually exclusive with account_name on the same change.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (use if you already know it, otherwise use item_name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
               },
               class_name: {
                 type: "string",
@@ -719,7 +750,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Line modifications. Provide line_id to update existing, omit to add new.",
+          description: "Line modifications. Provide line_id to update existing, omit to add new. A line may post against an Item — give item_name in place of account_name, with optional qty and unit_price.",
           items: {
             type: "object",
             properties: {
@@ -738,6 +769,30 @@ export const toolDefinitions = [
               description: {
                 type: "string",
                 description: "Line description",
+              },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name for an item-based line (auto-resolved to ID). Omit to keep the line's current item; pass \"\" together with account_name to convert the line to an account-based one. Mutually exclusive with account_name on the same change.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (use if you already know it, otherwise use item_name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (auto-resolved to ID). Omit to keep the line's current class; pass \"\" to clear it. QBO Class tracking, distinct from header-level Department/Location.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
               },
               customer_name: {
                 type: "string",
@@ -829,7 +884,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Array of expense line items. Provide account_name OR account_id (name preferred). Optionally provide customer_name OR customer_id to attribute the line to a customer.",
+          description: "Array of expense line items. Provide account_name OR account_id (name preferred), or item_name OR item_id to post the line against an Item instead — the two are mutually exclusive. Optionally provide qty and unit_price for an item line, class_name OR class_id for per-line Class tracking, and customer_name OR customer_id to attribute the line to a customer.",
           items: {
             type: "object",
             properties: {
@@ -849,6 +904,30 @@ export const toolDefinitions = [
                 type: "string",
                 description: "Line description (optional)",
               },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name. Posts the line against an Item (ItemBasedExpenseLineDetail) instead of a GL account. Mutually exclusive with account_name/account_id — a line is one or the other.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (use if you already know it, otherwise use item_name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., 'North', 'Parent:Child'). Will be looked up to get ID. QBO Class tracking, distinct from header-level Department/Location.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
+              },
               customer_name: {
                 type: "string",
                 description: "Customer or project this line is attributed to (auto-resolved to ID). Sets AccountBasedExpenseLineDetail.CustomerRef. Expense lines accept a customer only — the payee is the header entity_name. The line is marked NotBillable; these tools attribute cost, they do not queue it for re-invoicing.",
@@ -858,7 +937,6 @@ export const toolDefinitions = [
                 description: "Customer ID (use if you already know it, otherwise use customer_name)",
               },
             },
-            required: ["amount"],
           },
         },
         draft: {
