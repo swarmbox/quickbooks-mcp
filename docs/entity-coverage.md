@@ -188,9 +188,6 @@ entity (`RefundReceipt`), already signed correctly.
 
 Real gaps within entities that *are* scanned:
 
-- **`ItemBasedExpenseLineDetail` is ignored** on Purchase and Bill — only
-  `AccountBasedExpenseLineDetail` lines are read. Item-based expense lines are
-  invisible.
 - **SalesReceipt / Invoice / CreditMemo / RefundReceipt lines without an explicit
   `ItemAccountRef` are skipped**, since the income account is then implied by the
   Item.

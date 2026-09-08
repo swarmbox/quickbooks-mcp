@@ -323,6 +323,62 @@ accounting change, not a labelling one. These tools write `NotBillable`
 alongside any customer they set (and leave an existing `Billable` alone on
 edit), because they attribute cost rather than bill it.
 
+## An Expense Line Posts Against An Account Or An Item, Never Both
+
+`Bill.Line` and `Purchase.Line` accept two line shapes, and a line is exactly
+one of them:
+
+| Detail type | Carries |
+|-------------|---------|
+| `AccountBasedExpenseLineDetail` | `AccountRef`, `ClassRef`, `CustomerRef`, `BillableStatus`, `DepartmentRef` (rejected on write — see above) |
+| `ItemBasedExpenseLineDetail` | `ItemRef`, `Qty`, `UnitPrice`, `ClassRef`, `CustomerRef`, `BillableStatus` |
+
+`ClassRef` sits **inside the line detail**, on both shapes — it is not a header
+field, and it is unrelated to the header-level `DepartmentRef`. A property-management
+book tagging each line with a class for per-property P&L is the common case.
+
+A name that looks like an account may be an item: `Utilities:Water & Sewer` can
+be an item's `FullyQualifiedName` whose own `ExpenseAccountRef` points at a plain
+`Utilities` account. Resolving it as an account "works" and silently loses the
+item tracking, which is why `item_name` and `account_name` are separate
+parameters here and a line naming both is rejected rather than resolved by
+precedence.
+
+### `Amount` is validated against `Qty` × `UnitPrice`, not derived from it
+
+QBO computes `Qty × UnitPrice` at the precision sent, rounds that product to the
+cent, and compares it to `Amount`. A mismatch is fault **6070** ("Amount is not
+equal to UnitPrice*Qty").
+
+The counter-intuitive consequence: **rounding `UnitPrice` to cents is what causes
+6070**, not what avoids it.
+
+```
+amount 100.00 / qty 3 -> UnitPrice 33.333333  x 3 = 99.999999 -> 100.00  accepted
+                         UnitPrice 33.33      x 3 =     99.99 ->  99.99  REJECTED 6070
+```
+
+So a derived unit price keeps its extra precision. `resolveItemLineAmount`
+(`src/utils/item-line.ts`) owns this for every item-line path in this server —
+invoice, sales receipt, bill and expense — and asserts the product reconciles
+before returning rather than letting QBO discover it. Handlers must not
+re-derive or re-guard the arithmetic.
+
+Two consequences worth knowing:
+
+- **Editing an item line must move `Amount` and `UnitPrice` together.** Changing
+  only the amount leaves a stale `UnitPrice` whose product no longer matches, and
+  the edit is rejected.
+- **A very large `Qty` can be refused locally.** The helper bounds derived unit
+  prices to 6 decimal places, and past roughly 10,000 units the per-unit rounding
+  error accumulates beyond half a cent. Supplying `unit_price` directly does not
+  help — it accepts only 2 decimals. The remedy is to split the line.
+
+Caveat on provenance: the rounding behaviour above is established for
+`SalesItemLineDetail` and assumed to hold for `ItemBasedExpenseLineDetail`. No
+source found distinguishes them, and it has not yet been probed against a
+sandbox for the expense-line case.
+
 ## Sales Receipt And Invoice Lines Have No Entity
 
 `SalesItemLineDetail` carries `ItemRef`, `ClassRef`, and tax fields — there is
