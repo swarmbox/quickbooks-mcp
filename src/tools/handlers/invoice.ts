@@ -9,7 +9,7 @@ import {
   resolveItem,
   resolveCustomer,
 } from "../../client/index.js";
-import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
+import { buildQboUrl, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
 
 interface InvoiceLineChange {
   line_id?: string;

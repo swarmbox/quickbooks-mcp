@@ -123,7 +123,7 @@ describe("invoice item lines", () => {
           lines: [{ item_name: "Widget", unit_price: 10.01, qty: 2.5 }],
           draft: false,
         }),
-      /Widget/,
+      /whole number of cents/,
     );
     assert.equal(sent.created.length, 0);
   });

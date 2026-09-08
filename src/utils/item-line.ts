@@ -32,6 +32,25 @@ export interface ResolvedItemLineAmount {
   amountCents: number;
 }
 
+/**
+ * Guard the whole-cent invariant on the way out.
+ *
+ * Neither the tolerance check nor the reconcile-assert can catch a non-finite
+ * value: `Math.abs(Infinity - Math.round(Infinity))` is `NaN` and every `NaN`
+ * comparison is false, while `Infinity !== Infinity` is also false. So both
+ * guards silently pass and `Amount` serializes to JSON `null` — a payload QBO
+ * cannot read. `Number.isSafeInteger` rejects `Infinity`, `NaN`, and anything
+ * past 2^53 where float addition stops being exact in cents.
+ */
+function assertWholeCents(amountCents: number, label: string): void {
+  if (!Number.isSafeInteger(amountCents)) {
+    throw new Error(
+      `${label}: derived amount ${amountCents} is not a safe whole number of cents. ` +
+      `Amounts must be finite and below ${Number.MAX_SAFE_INTEGER / 100} dollars.`,
+    );
+  }
+}
+
 function roundTo(value: number, decimals: number): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;
@@ -65,7 +84,11 @@ export function resolveItemLineAmount(
   }
 
   if (amount !== undefined) {
+    if (!Number.isFinite(amount)) {
+      throw new Error(`${label} has amount ${amount}, which must be a finite number`);
+    }
     const amountCents = validateAmount(amount, label);
+    assertWholeCents(amountCents, label);
     const unitPriceDollars = roundTo(toDollars(amountCents) / qty, UNIT_PRICE_DECIMALS);
 
     if (Math.round(qty * unitPriceDollars * 100) !== amountCents) {
@@ -73,7 +96,8 @@ export function resolveItemLineAmount(
         `${label}: amount ${toDollars(amountCents).toFixed(2)} over qty ${qty} needs a unit ` +
         `price finer than ${UNIT_PRICE_DECIMALS} decimal places (${unitPriceDollars} does not ` +
         `reconcile). Split the line evenly into lines of fewer than ` +
-        `${MAX_RECONCILABLE_QTY} units each. Do not pass unit_price instead — it only ` +
+        `${MAX_RECONCILABLE_QTY} units each — the customer will see one line per part, ` +
+        `so this is not a free remedy. Do not pass unit_price instead — it only ` +
         `accepts 2 decimal places, so it cannot express this value either. This limit is ` +
         `this server's, not QuickBooks'.`,
       );
@@ -82,6 +106,9 @@ export function resolveItemLineAmount(
     return { qty, unitPriceDollars, amountCents };
   }
 
+  if (!Number.isFinite(unitPrice!)) {
+    throw new Error(`${label} has unit_price ${unitPrice}, which must be a finite number`);
+  }
   const upCents = validateAmount(unitPrice!, `${label} unit_price`);
   const product = upCents * qty;
 
@@ -93,5 +120,20 @@ export function resolveItemLineAmount(
     );
   }
 
-  return { qty, unitPriceDollars: toDollars(upCents), amountCents: Math.round(product) };
+  const amountCents = Math.round(product);
+  assertWholeCents(amountCents, label);
+
+  const unitPriceDollars = toDollars(upCents);
+  // The same reconcile-assert the amount branch applies. It agrees with
+  // `upCents * qty` at every reachable magnitude, but the two evaluation
+  // orders diverge past ~2^53 cents, and the invariant is stated without
+  // qualification — so enforce it here rather than document an exception.
+  if (Math.round(qty * unitPriceDollars * 100) !== amountCents) {
+    throw new Error(
+      `${label}: unit_price ${unitPriceDollars} times qty ${qty} cannot be represented ` +
+      `exactly in cents (${amountCents}). Split the line into smaller amounts.`,
+    );
+  }
+
+  return { qty, unitPriceDollars, amountCents };
 }

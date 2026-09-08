@@ -113,4 +113,21 @@ describe("sales receipt item lines", () => {
       line.Amount,
     );
   });
+
+  it("rejects a sub-cent line without issuing a write", async () => {
+    // Parity with the invoice suite: the two handlers are byte-similar and
+    // should not diverge in coverage of the no-write-on-throw guarantee.
+    const { client, sent } = fakeClient();
+    await assert.rejects(
+      () =>
+        handleCreateSalesReceipt(client, {
+          txn_date: "2026-01-15",
+          customer_name: "South Depot",
+          lines: [{ item_name: "Widget", unit_price: 10.01, qty: 2.5 }],
+          draft: false,
+        }),
+      /whole number of cents/,
+    );
+    assert.equal(sent.created.length, 0);
+  });
 });

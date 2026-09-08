@@ -67,6 +67,8 @@ describe("resolveItemLineAmount", () => {
       (e: Error) => {
         assert.match(e.message, /L/);
         assert.match(e.message, /30000/);
+        assert.match(e.message, /0\.011667/);
+        assert.match(e.message, /6 decimal places/);
         assert.match(e.message, /split/i);
         return true;
       },
@@ -74,7 +76,27 @@ describe("resolveItemLineAmount", () => {
   });
 
   it("rejects qty 0", () => {
-    assert.throws(() => resolveItemLineAmount({ amount: 10.00, qty: 0 }, "L"), /L/);
+    // The unit_price shape is what actually pins the guard: without it,
+    // 1000 * 0 returns amountCents 0 silently. The amount shape throws either
+    // way (10/0 is Infinity, which the reconcile-assert also rejects), so it
+    // cannot tell the guard's presence from its absence.
+    assert.throws(
+      () => resolveItemLineAmount({ unit_price: 10.00, qty: 0 }, "L"),
+      /must be a finite number greater than 0/,
+    );
+    assert.throws(
+      () => resolveItemLineAmount({ amount: 10.00, qty: 0 }, "L"),
+      /must be a finite number greater than 0/,
+    );
+  });
+
+  it("defaults qty to 1 when omitted", () => {
+    // The most common production shape: lines: [{ item_name, amount }].
+    assert.deepEqual(resolveItemLineAmount({ amount: 10.00 }, "L"), {
+      qty: 1,
+      unitPriceDollars: 10,
+      amountCents: 1000,
+    });
   });
 
   it("rejects a non-finite or negative qty", () => {
@@ -82,6 +104,17 @@ describe("resolveItemLineAmount", () => {
     assert.throws(() => resolveItemLineAmount({ amount: 10.00, qty: NaN }, "L"), /L/);
     assert.throws(() => resolveItemLineAmount({ amount: 10.00, qty: Infinity }, "L"), /L/);
     assert.throws(() => resolveItemLineAmount({ amount: 10.00, qty: -1 }, "L"), /L/);
+  });
+
+  it("rejects a non-finite or unsafe amount", () => {
+    // Infinity and NaN slip past BOTH the tolerance check and the
+    // reconcile-assert — Math.abs(Infinity - Infinity) is NaN and every NaN
+    // comparison is false, and Infinity === Infinity. The resulting Amount
+    // serializes to JSON null and ships to QBO.
+    assert.throws(() => resolveItemLineAmount({ amount: 1e307, qty: 2 }, "L"), /L/);
+    assert.throws(() => resolveItemLineAmount({ amount: Infinity, qty: 2 }, "L"), /L/);
+    assert.throws(() => resolveItemLineAmount({ unit_price: 1e308, qty: 100 }, "L"), /L/);
+    assert.throws(() => resolveItemLineAmount({ unit_price: NaN, qty: 1 }, "L"), /L/);
   });
 
   it("rejects input with neither amount nor unit_price", () => {
