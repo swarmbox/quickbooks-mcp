@@ -542,8 +542,21 @@ export async function handleEditBill(
           const classRef = resolveClassInput(classCacheData, change, label);
           const customerRef = await resolveCustomerInput(client, change, label);
 
+          // ClassRef, CustomerRef and BillableStatus all live on BOTH detail
+          // types, so a line that only changes which detail it uses keeps them.
+          // Seeding the target detail with them is what makes the conversion
+          // symmetric — carrying class one way and dropping the customer the
+          // other is the same silent loss this branch exists to prevent.
+          const existingDetail = line.ItemBasedExpenseLineDetail ?? line.AccountBasedExpenseLineDetail;
+          const carried = {
+            ...(existingDetail?.ClassRef && { ClassRef: existingDetail.ClassRef }),
+            ...(existingDetail?.CustomerRef && { CustomerRef: existingDetail.CustomerRef }),
+            ...(existingDetail?.BillableStatus && { BillableStatus: existingDetail.BillableStatus }),
+          };
+
           if (becomesItem) {
             const detail = {
+              ...carried,
               ...(line.ItemBasedExpenseLineDetail || {}),
             } as NonNullable<typeof line.ItemBasedExpenseLineDetail>;
 
@@ -592,11 +605,8 @@ export async function handleEditBill(
           }
 
           const detail = {
+            ...carried,
             ...(line.AccountBasedExpenseLineDetail || {}),
-            // A converted item line keeps its class; it lives on both details.
-            ...(line.ItemBasedExpenseLineDetail?.ClassRef && !line.AccountBasedExpenseLineDetail
-              ? { ClassRef: line.ItemBasedExpenseLineDetail.ClassRef }
-              : {}),
           } as NonNullable<typeof line.AccountBasedExpenseLineDetail>;
 
           if (change.amount !== undefined) {

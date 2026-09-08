@@ -541,3 +541,87 @@ describe("tri-state item and class on edit", () => {
     assert.equal((sent.updated[0] as Record<string, unknown>).sparse, true);
   });
 });
+
+describe("converting a line's detail type keeps what both types share", () => {
+  // ClassRef, CustomerRef and BillableStatus exist on both detail types. A
+  // caller who only re-types a line did not ask to lose any of them, and losing
+  // the customer silently is the same failure mode as losing the item.
+  const ITEM_LINE_WITH_CUSTOMER = {
+    Id: "800",
+    SyncToken: "0",
+    TxnDate: "2026-01-15",
+    VendorRef: { value: "20", name: "Acme Supply Co" },
+    Line: [{
+      Id: "1",
+      Amount: 90.0,
+      DetailType: "ItemBasedExpenseLineDetail",
+      ItemBasedExpenseLineDetail: {
+        ItemRef: { value: "50", name: "Widget" },
+        ClassRef: { value: "60", name: "North" },
+        CustomerRef: { value: "30", name: "Northwind Trading" },
+        BillableStatus: "NotBillable",
+        Qty: 3,
+        UnitPrice: 30.0,
+      },
+    }],
+  };
+
+  const ACCOUNT_LINE_WITH_CUSTOMER = {
+    ...ITEM_LINE_WITH_CUSTOMER,
+    Line: [{
+      Id: "1",
+      Amount: 90.0,
+      DetailType: "AccountBasedExpenseLineDetail",
+      AccountBasedExpenseLineDetail: {
+        AccountRef: { value: "12", name: "Supplies" },
+        ClassRef: { value: "60", name: "North" },
+        CustomerRef: { value: "30", name: "Northwind Trading" },
+        BillableStatus: "NotBillable",
+      },
+    }],
+  };
+
+  it("carries class and customer from item to account", async () => {
+    const { client, sent } = fakeClient(ITEM_LINE_WITH_CUSTOMER);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", account_name: "Supplies" }],
+      draft: false,
+    });
+
+    const detail = linesOf(sent.updated[0])[0].AccountBasedExpenseLineDetail;
+    assert.deepEqual(detail.ClassRef, { value: "60", name: "North" });
+    assert.deepEqual(detail.CustomerRef, { value: "30", name: "Northwind Trading" });
+    assert.equal(detail.BillableStatus, "NotBillable");
+  });
+
+  it("carries class and customer from account to item", async () => {
+    const { client, sent } = fakeClient(ACCOUNT_LINE_WITH_CUSTOMER);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", item_name: "Widget" }],
+      draft: false,
+    });
+
+    const line = linesOf(sent.updated[0])[0];
+    assert.equal(line.DetailType, "ItemBasedExpenseLineDetail");
+    assert.equal(line.AccountBasedExpenseLineDetail, undefined);
+    const detail = line.ItemBasedExpenseLineDetail;
+    assert.deepEqual(detail.ItemRef, { value: "50", name: "Widget" });
+    assert.deepEqual(detail.ClassRef, { value: "60", name: "North" });
+    assert.deepEqual(detail.CustomerRef, { value: "30", name: "Northwind Trading" });
+  });
+
+  it("still lets an explicit empty clear a carried ref during conversion", async () => {
+    const { client, sent } = fakeClient(ITEM_LINE_WITH_CUSTOMER);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", account_name: "Supplies", customer_name: "", class_name: "" }],
+      draft: false,
+    });
+
+    const detail = linesOf(sent.updated[0])[0].AccountBasedExpenseLineDetail;
+    assert.equal(detail.ClassRef, undefined);
+    assert.equal(detail.CustomerRef, undefined);
+  });
+});
