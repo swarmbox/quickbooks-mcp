@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import type QuickBooks from "node-quickbooks";
 
 import { clearLookupCache } from "../../src/client/index.js";
-import { handleCreateBill, handleEditBill } from "../../src/tools/handlers/bill.js";
+import { handleCreateBill, handleEditBill, handleGetBill } from "../../src/tools/handlers/bill.js";
 import { handleCreateExpense, handleEditExpense } from "../../src/tools/handlers/expense.js";
 
 type Callback<T> = (err: unknown, result: T) => void;
@@ -623,5 +623,62 @@ describe("converting a line's detail type keeps what both types share", () => {
     const detail = linesOf(sent.updated[0])[0].AccountBasedExpenseLineDetail;
     assert.equal(detail.ClassRef, undefined);
     assert.equal(detail.CustomerRef, undefined);
+  });
+});
+
+describe("previews and reads show item and class", () => {
+  // Draft mode is the safety gate on these tools. A field a caller can set but
+  // cannot see in the preview undercuts it — and ClassRef was written by the
+  // bill tools since #63 while being printed by nothing at all.
+  function textOf(result: { content: Array<{ type: string; text: string }> }): string {
+    return result.content.map(c => c.text).join("\n");
+  }
+
+  it("shows the item, qty and class in a create draft preview", async () => {
+    const { client } = fakeClient();
+    const preview = textOf(await handleCreateBill(client, {
+      vendor_name: "Acme Supply Co",
+      txn_date: "2026-01-31",
+      lines: [{ item_name: "Widget", class_name: "North", amount: 90.0, qty: 3 }],
+    }));
+
+    assert.match(preview, /Item: Widget/);
+    assert.match(preview, /Qty: 3/);
+    assert.match(preview, /\[Class: North\]/);
+  });
+
+  it("shows the class on an account line in a create draft preview", async () => {
+    const { client } = fakeClient();
+    const preview = textOf(await handleCreateExpense(client, {
+      payment_type: "Check",
+      payment_account: "Checking",
+      txn_date: "2026-01-31",
+      lines: [{ account_name: "Supplies", class_name: "South", amount: 25.0 }],
+    }));
+
+    assert.match(preview, /\[Class: South\]/);
+  });
+
+  it("renders an item line in an edit draft preview at all", async () => {
+    // The account-only guard this replaces skipped item lines silently, so the
+    // preview showed nothing for the very line being changed.
+    const { client } = fakeClient(BILL_WITH_ITEM_LINE);
+    const preview = textOf(await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", amount: 120.0 }],
+    }));
+
+    assert.match(preview, /Item: Widget/);
+    assert.match(preview, /\[Class: North\]/);
+    assert.match(preview, /120\.00/);
+  });
+
+  it("shows the class when reading a bill back", async () => {
+    const { client } = fakeClient(BILL_WITH_ITEM_LINE);
+    const rendered = textOf(await handleGetBill(client, { id: "800" }));
+
+    assert.match(rendered, /\[Class: North\]/);
+    assert.match(rendered, /Item: Widget/);
+    assert.match(rendered, /Qty: 3/);
   });
 });

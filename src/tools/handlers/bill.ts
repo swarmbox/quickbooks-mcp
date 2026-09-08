@@ -265,6 +265,18 @@ export async function handleCreateBill(
       return `${num}${l.account_name || l.account_id}`;
     };
 
+    // Every field a caller can set on a line has to be visible here: draft mode
+    // is the safety gate, and a field you can set but cannot see undercuts it.
+    const formatLine = (l: typeof resolvedLines[0]) => {
+      const label = l.item_ref
+        ? `Item: ${l.item_ref.name}${l.qty && l.qty !== 1 ? ` (Qty: ${l.qty} x $${(l.unit_price ?? 0).toFixed(2)})` : ""}`
+        : formatAccount(l);
+      const classStr = l.class_ref ? ` [Class: ${l.class_ref.name}]` : "";
+      const custStr = l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : "";
+      const descStr = l.description ? ` "${l.description}"` : "";
+      return `  ${label}${classStr}${custStr}: $${l.amount.toFixed(2)}${descStr}`;
+    };
+
     const preview = [
       "DRAFT - Bill Preview",
       "",
@@ -278,9 +290,7 @@ export async function handleCreateBill(
       `Total: $${formatDollars(totalCents)}`,
       "",
       "Lines:",
-      ...resolvedLines.map(l =>
-        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : ""}${l.description ? ` "${l.description}"` : ""}`
-      ),
+      ...resolvedLines.map(formatLine),
       "",
       "Set draft=false to create this bill.",
     ].join("\n");
@@ -377,13 +387,17 @@ export async function handleGetBill(
       const acctName = detail.AccountRef.name || detail.AccountRef.value;
       const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
       const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+      const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${classStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     } else if (line.ItemBasedExpenseLineDetail) {
       const detail = line.ItemBasedExpenseLineDetail;
       const itemName = detail.ItemRef.name || detail.ItemRef.value;
+      const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
+      const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+      const priceStr = detail.UnitPrice !== undefined ? ` x $${detail.UnitPrice.toFixed(2)}` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: Item: ${itemName} (Qty: ${detail.Qty || 1}) $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: Item: ${itemName} (Qty: ${detail.Qty ?? 1}${priceStr})${classStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     }
   }
 
@@ -716,14 +730,21 @@ export async function handleEditBill(
     if (updated.Line) {
       previewLines.push('');
       previewLines.push('Updated Lines:');
+      // Read off the built payload, not the inputs — that is what makes
+      // preserve-on-omit visible before the caller sets draft=false. Item lines
+      // were skipped entirely by the account-only guard this replaces.
       for (const line of updated.Line as typeof finalLines) {
-        const detail = line.AccountBasedExpenseLineDetail;
-        if (detail) {
-          const acctName = detail.AccountRef.name || detail.AccountRef.value;
-          const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
-          const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
-          previewLines.push(`  ${acctName}${deptStr}${custStr}: $${line.Amount.toFixed(2)}`);
-        }
+        const item = line.ItemBasedExpenseLineDetail;
+        const acct = line.AccountBasedExpenseLineDetail;
+        const detail = item ?? acct;
+        if (!detail) continue;
+        const label = item
+          ? `Item: ${item.ItemRef.name || item.ItemRef.value}${item.Qty && item.Qty !== 1 ? ` (Qty: ${item.Qty} x $${(item.UnitPrice ?? 0).toFixed(2)})` : ''}`
+          : `${acct!.AccountRef.name || acct!.AccountRef.value}`;
+        const deptStr = acct?.DepartmentRef?.name ? ` [${acct.DepartmentRef.name}]` : '';
+        const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
+        const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+        previewLines.push(`  ${label}${deptStr}${classStr}${custStr}: $${line.Amount.toFixed(2)}`);
       }
     }
 
