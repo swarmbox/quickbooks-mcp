@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import type QuickBooks from "node-quickbooks";
 
 import { clearLookupCache } from "../../src/client/index.js";
-import { handleCreateBill } from "../../src/tools/handlers/bill.js";
-import { handleCreateExpense } from "../../src/tools/handlers/expense.js";
+import { handleCreateBill, handleEditBill } from "../../src/tools/handlers/bill.js";
+import { handleCreateExpense, handleEditExpense } from "../../src/tools/handlers/expense.js";
 
 type Callback<T> = (err: unknown, result: T) => void;
 
@@ -35,10 +35,43 @@ const ITEMS = [
 
 interface Sent {
   created: unknown[];
+  updated: unknown[];
 }
 
-function fakeClient() {
-  const sent: Sent = { created: [] };
+// A bill whose one line is item-based and class-tagged — the shape this feature
+// makes writable, and the shape the edit path used to corrupt.
+const ITEM_LINE = {
+  Id: "1",
+  LineNum: 1,
+  Amount: 90.0,
+  DetailType: "ItemBasedExpenseLineDetail",
+  ItemBasedExpenseLineDetail: {
+    ItemRef: { value: "50", name: "Widget" },
+    ClassRef: { value: "60", name: "North" },
+    Qty: 3,
+    UnitPrice: 30.0,
+  },
+};
+
+const BILL_WITH_ITEM_LINE = {
+  Id: "800",
+  SyncToken: "0",
+  TxnDate: "2026-01-15",
+  VendorRef: { value: "20", name: "Acme Supply Co" },
+  Line: [ITEM_LINE],
+};
+
+const EXPENSE_WITH_ITEM_LINE = {
+  Id: "700",
+  SyncToken: "0",
+  TxnDate: "2026-01-15",
+  PaymentType: "Check",
+  AccountRef: { value: "10", name: "Checking" },
+  Line: [ITEM_LINE],
+};
+
+function fakeClient(entity?: Record<string, unknown>) {
+  const sent: Sent = { created: [], updated: [] };
   const list = <T>(key: string, rows: T[]) => ({ QueryResponse: { [key]: rows } });
 
   const client = {
@@ -69,6 +102,16 @@ function fakeClient() {
     createPurchase: (body: unknown, cb: Callback<unknown>) => {
       sent.created.push(body);
       cb(null, { Id: "701" });
+    },
+    getBill: (_id: string, cb: Callback<unknown>) => cb(null, entity),
+    getPurchase: (_id: string, cb: Callback<unknown>) => cb(null, entity),
+    updateBill: (body: unknown, cb: Callback<unknown>) => {
+      sent.updated.push(body);
+      cb(null, { Id: "800", SyncToken: "1" });
+    },
+    updatePurchase: (body: unknown, cb: Callback<unknown>) => {
+      sent.updated.push(body);
+      cb(null, { Id: "700", SyncToken: "1" });
     },
   } as unknown as QuickBooks;
 
@@ -312,5 +355,189 @@ describe("account lines are unchanged by this feature", () => {
     const detail = line.ItemBasedExpenseLineDetail;
     assert.deepEqual(detail.CustomerRef, { value: "30", name: "Northwind Trading" });
     assert.equal(detail.BillableStatus, "NotBillable");
+  });
+});
+
+describe("editing a line preserves its detail type", () => {
+  it("keeps ItemRef and ClassRef when only the amount changes", async () => {
+    // The bug this fixes: the edit path used to force every line to
+    // AccountBasedExpenseLineDetail and bolt on an empty detail object, leaving
+    // the original item detail behind — a malformed dual-detail line.
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", amount: 120.0 }],
+      draft: false,
+    });
+
+    const [line] = linesOf(sent.updated[0]);
+    assert.equal(line.DetailType, "ItemBasedExpenseLineDetail");
+    assert.equal(line.AccountBasedExpenseLineDetail, undefined);
+    const detail = line.ItemBasedExpenseLineDetail;
+    assert.deepEqual(detail.ItemRef, { value: "50", name: "Widget" });
+    assert.deepEqual(detail.ClassRef, { value: "60", name: "North" });
+    assert.equal(line.Amount, 120.0);
+  });
+
+  it("does the same on an expense", async () => {
+    const { client, sent } = fakeClient(EXPENSE_WITH_ITEM_LINE);
+    await handleEditExpense(client, {
+      id: "700",
+      lines: [{ line_id: "1", amount: 120.0 }],
+      draft: false,
+    });
+
+    const [line] = linesOf(sent.updated[0]);
+    assert.equal(line.DetailType, "ItemBasedExpenseLineDetail");
+    assert.equal(line.AccountBasedExpenseLineDetail, undefined);
+    assert.deepEqual(line.ItemBasedExpenseLineDetail.ItemRef, { value: "50", name: "Widget" });
+  });
+
+  it("recomputes UnitPrice so Qty x UnitPrice still reconciles to Amount", async () => {
+    // Qty 3 is deliberate: a round-to-cents derivation of 100.00/3 yields 33.33,
+    // whose product is 99.99, and QBO rejects that mismatch with fault 6070.
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", amount: 100.0 }],
+      draft: false,
+    });
+
+    const [line] = linesOf(sent.updated[0]);
+    const detail = line.ItemBasedExpenseLineDetail;
+    assert.equal(detail.Qty, 3);
+    assert.equal(
+      Number(((detail.Qty as number) * (detail.UnitPrice as number)).toFixed(2)),
+      line.Amount
+    );
+    assert.notEqual(detail.UnitPrice, 33.33);
+  });
+
+  it("does not add a Qty to a fetched line that carried none", async () => {
+    // The helper defaults qty to 1, but writing that back would change the
+    // stored line shape beyond the derivation the edit asked for.
+    const noQty = {
+      ...BILL_WITH_ITEM_LINE,
+      Line: [{
+        Id: "1",
+        Amount: 90.0,
+        DetailType: "ItemBasedExpenseLineDetail",
+        ItemBasedExpenseLineDetail: { ItemRef: { value: "50", name: "Widget" } },
+      }],
+    };
+    const { client, sent } = fakeClient(noQty);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", amount: 45.0 }],
+      draft: false,
+    });
+
+    const [line] = linesOf(sent.updated[0]);
+    assert.equal(line.ItemBasedExpenseLineDetail.Qty, undefined);
+    assert.equal(line.Amount, 45.0);
+  });
+
+  it("throws on a fetched line carrying Qty 0 rather than emitting Infinity", async () => {
+    // Deliberate behaviour change: the helper rejects a non-positive qty, so an
+    // amount-only edit on such a line now fails where it silently succeeded.
+    const zeroQty = {
+      ...BILL_WITH_ITEM_LINE,
+      Line: [{
+        Id: "1",
+        Amount: 0,
+        DetailType: "ItemBasedExpenseLineDetail",
+        ItemBasedExpenseLineDetail: { ItemRef: { value: "50", name: "Widget" }, Qty: 0 },
+      }],
+    };
+    const { client } = fakeClient(zeroQty);
+    const message = await rejection(() =>
+      handleEditBill(client, { id: "800", lines: [{ line_id: "1", amount: 45.0 }], draft: false })
+    );
+    assert.match(message, /qty/i);
+  });
+});
+
+describe("tri-state item and class on edit", () => {
+  it("preserves the class when class_name is omitted and clears it on empty", async () => {
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", description: "Restock" }],
+      draft: false,
+    });
+    assert.deepEqual(linesOf(sent.updated[0])[0].ItemBasedExpenseLineDetail.ClassRef, {
+      value: "60",
+      name: "North",
+    });
+
+    clearLookupCache();
+    const second = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(second.client, {
+      id: "800",
+      lines: [{ line_id: "1", class_name: "" }],
+      draft: false,
+    });
+    assert.equal(
+      linesOf(second.sent.updated[0])[0].ItemBasedExpenseLineDetail.ClassRef,
+      undefined
+    );
+  });
+
+  it("converts an item line to an account line when given account_name", async () => {
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ line_id: "1", account_name: "Supplies" }],
+      draft: false,
+    });
+
+    const [line] = linesOf(sent.updated[0]);
+    assert.equal(line.DetailType, "AccountBasedExpenseLineDetail");
+    assert.equal(line.ItemBasedExpenseLineDetail, undefined);
+    assert.deepEqual(line.AccountBasedExpenseLineDetail.AccountRef, {
+      value: "12",
+      name: "Supplies",
+    });
+    // The class survives the conversion; it lives on both detail types.
+    assert.deepEqual(line.AccountBasedExpenseLineDetail.ClassRef, { value: "60", name: "North" });
+  });
+
+  it("rejects clearing an item without naming an account to replace it", async () => {
+    const { client } = fakeClient(BILL_WITH_ITEM_LINE);
+    const message = await rejection(() =>
+      handleEditBill(client, {
+        id: "800",
+        lines: [{ line_id: "1", item_name: "" }],
+        draft: false,
+      })
+    );
+    assert.match(message, /account_name/);
+  });
+
+  it("adds a new item line on edit", async () => {
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, {
+      id: "800",
+      lines: [{ item_name: "Consulting Hours", amount: 50.0, class_name: "South" }],
+      draft: false,
+    });
+
+    const lines = linesOf(sent.updated[0]);
+    assert.equal(lines.length, 2);
+    const added = lines[1];
+    assert.equal(added.DetailType, "ItemBasedExpenseLineDetail");
+    assert.deepEqual(added.ItemBasedExpenseLineDetail.ItemRef, {
+      value: "51",
+      name: "Consulting Hours",
+    });
+    assert.deepEqual(added.ItemBasedExpenseLineDetail.ClassRef, { value: "61", name: "South" });
+  });
+
+  it("sends no Line key at all when the edit changes no lines", async () => {
+    const { client, sent } = fakeClient(BILL_WITH_ITEM_LINE);
+    await handleEditBill(client, { id: "800", memo: "Just a memo", draft: false });
+
+    assert.equal((sent.updated[0] as Record<string, unknown>).Line, undefined);
+    assert.equal((sent.updated[0] as Record<string, unknown>).sparse, true);
   });
 });
