@@ -5,20 +5,29 @@ import {
   promisify,
   promisifyWrite,
   getAccountCache,
+  getClassCache,
   getDepartmentCache,
   resolveAccountRef,
   resolveEntityRef,
+  resolveClassInput,
+  resolveItemInput,
   resolveCustomerInput,
   normalizeEntityKind,
   toPurchaseEntityRef,
   toQboRef,
 } from "../../client/index.js";
-import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
 
 interface CreateExpenseLine {
   account_id?: string;
   account_name?: string;
-  amount: number;
+  item_id?: string;
+  item_name?: string;
+  qty?: number;
+  unit_price?: number;
+  class_id?: string;
+  class_name?: string;
+  amount?: number;
   description?: string;
   customer_name?: string;
   customer_id?: string;
@@ -27,6 +36,12 @@ interface CreateExpenseLine {
 interface ExpenseLineChange {
   line_id?: string;
   account_name?: string;
+  class_id?: string;
+  class_name?: string;
+  item_id?: string;
+  item_name?: string;
+  qty?: number;
+  unit_price?: number;
   amount?: number;
   description?: string;
   customer_name?: string;
@@ -68,9 +83,10 @@ export async function handleCreateExpense(
   }
 
   // Get cached lookups in parallel
-  const [acctCache, deptCache] = await Promise.all([
+  const [acctCache, deptCache, classCacheData] = await Promise.all([
     getAccountCache(client),
     getDepartmentCache(client),
+    getClassCache(client),
   ]);
 
   // Resolve payment account (acctNum is kept for the draft preview)
@@ -112,29 +128,68 @@ export async function handleCreateExpense(
     }
   }
 
-  // Resolve lines. Customer resolution can hit the API, so this is a loop.
+  // Resolve lines. Item and customer resolution can hit the API, so this is a
+  // loop. A line posts against an item or an account, never both.
   const resolvedLines: Array<CreateExpenseLine & {
-    account_id: string;
+    account_id?: string;
     account_num?: string;
     amount_cents: number;
+    amount: number;
+    item_ref?: { value: string; name: string };
+    class_ref?: { value: string; name: string };
     customer_ref?: { value: string; name: string };
   }> = [];
-  for (const line of lines) {
+  for (const [index, line] of lines.entries()) {
+    const label = `Line ${index + 1}`;
+    const itemInput = line.item_id || line.item_name;
+    const accountInput = line.account_id || line.account_name;
+
+    if (itemInput && accountInput) {
+      throw new Error(
+        `${label} names both an item ("${itemInput}") and an account ("${accountInput}"). ` +
+        `A line posts against one or the other — drop whichever does not apply.`
+      );
+    }
+    if (!itemInput && !accountInput) {
+      throw new Error(`${label} must have an item (item_name/item_id) or an account (account_name/account_id)`);
+    }
+
+    const classRef = resolveClassInput(classCacheData, line, label);
+    const customerRef = await resolveCustomerInput(client, line, label);
+
+    if (itemInput) {
+      const itemRef = await resolveItemInput(client, line, label);
+      // resolveItemLineAmount owns the whole triple: the precondition, the
+      // qty > 0 and non-finite guards, and the reconcile-assert that keeps
+      // Qty x UnitPrice rounding back to Amount. Do not re-guard any of it.
+      const { qty, unitPriceDollars, amountCents } = resolveItemLineAmount(line, label);
+      resolvedLines.push({
+        ...line,
+        amount_cents: amountCents,
+        amount: toDollars(amountCents),
+        item_ref: itemRef ?? undefined,
+        class_ref: classRef ?? undefined,
+        customer_ref: customerRef ?? undefined,
+        qty,
+        unit_price: unitPriceDollars,
+      });
+      continue;
+    }
+
     let accountId = line.account_id;
     let accountName = line.account_name;
     let accountNum: string | undefined;
-
     if (!accountId && accountName) {
       const account = resolveAccountRef(acctCache, accountName);
       accountId = account.value;
       accountName = account.name;
       accountNum = account.acctNum;
-    } else if (!accountId && !accountName) {
-      throw new Error("Each line must have either account_id or account_name");
     }
 
-    const amountCents = validateAmount(line.amount, `Line ${accountName || accountId}`);
-    const customerRef = await resolveCustomerInput(client, line, `Line ${accountName || accountId}`);
+    if (line.amount === undefined) {
+      throw new Error(`${label} requires an amount`);
+    }
+    const amountCents = validateAmount(line.amount, label);
 
     resolvedLines.push({
       ...line,
@@ -142,6 +197,7 @@ export async function handleCreateExpense(
       account_name: accountName,
       account_num: accountNum,
       amount_cents: amountCents,
+      class_ref: classRef ?? undefined,
       customer_ref: customerRef ?? undefined,
       amount: toDollars(amountCents),
     });
@@ -159,30 +215,66 @@ export async function handleCreateExpense(
     ...(departmentRef && { DepartmentRef: departmentRef }),
     ...(memo && { PrivateNote: memo }),
     ...(doc_number && { DocNumber: doc_number }),
-    Line: resolvedLines.map((line) => ({
-      Amount: line.amount,
-      DetailType: "AccountBasedExpenseLineDetail",
-      ...(line.description && { Description: line.description }),
-      AccountBasedExpenseLineDetail: {
-        AccountRef: {
-          value: line.account_id,
-          name: line.account_name,
+    Line: resolvedLines.map((line) => {
+      const base = {
+        Amount: line.amount,
+        ...(line.description && { Description: line.description }),
+      };
+      if (line.item_ref) {
+        return {
+          ...base,
+          DetailType: "ItemBasedExpenseLineDetail",
+          ItemBasedExpenseLineDetail: {
+            ItemRef: line.item_ref,
+            Qty: line.qty,
+            UnitPrice: line.unit_price,
+            ...(line.class_ref && { ClassRef: line.class_ref }),
+            // Same coupling as the account branch: BillableStatus travels with
+            // CustomerRef, and only with it, on this handler.
+            ...(line.customer_ref && {
+              CustomerRef: line.customer_ref,
+              BillableStatus: "NotBillable",
+            }),
+          },
+        };
+      }
+      return {
+        ...base,
+        DetailType: "AccountBasedExpenseLineDetail",
+        AccountBasedExpenseLineDetail: {
+          AccountRef: {
+            value: line.account_id,
+            name: line.account_name,
+          },
+          ...(line.class_ref && { ClassRef: line.class_ref }),
+          // A CustomerRef with no BillableStatus can default to Billable, which
+          // would queue the cost for re-invoicing. These tools attribute cost;
+          // they do not bill it, so say NotBillable explicitly.
+          ...(line.customer_ref && {
+            CustomerRef: line.customer_ref,
+            BillableStatus: "NotBillable",
+          }),
         },
-        // A CustomerRef with no BillableStatus can default to Billable, which
-        // would queue the cost for re-invoicing. These tools attribute cost;
-        // they do not bill it, so say NotBillable explicitly.
-        ...(line.customer_ref && {
-          CustomerRef: line.customer_ref,
-          BillableStatus: "NotBillable",
-        }),
-      },
-    })),
+      };
+    }),
   };
 
   if (draft) {
     const formatAccount = (l: typeof resolvedLines[0]) => {
       const num = l.account_num ? `${l.account_num} ` : "";
       return `${num}${l.account_name || l.account_id}`;
+    };
+
+    // Every field a caller can set on a line has to be visible here: draft mode
+    // is the safety gate, and a field you can set but cannot see undercuts it.
+    const formatLine = (l: typeof resolvedLines[0]) => {
+      const label = l.item_ref
+        ? `Item: ${l.item_ref.name}${l.qty && l.qty !== 1 ? ` (Qty: ${l.qty} x $${(l.unit_price ?? 0).toFixed(2)})` : ""}`
+        : formatAccount(l);
+      const classStr = l.class_ref ? ` [Class: ${l.class_ref.name}]` : "";
+      const custStr = l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : "";
+      const descStr = l.description ? ` "${l.description}"` : "";
+      return `  ${label}${classStr}${custStr}: $${l.amount.toFixed(2)}${descStr}`;
     };
 
     const preview = [
@@ -198,9 +290,7 @@ export async function handleCreateExpense(
       `Total: $${formatDollars(totalCents)}`,
       "",
       "Lines:",
-      ...resolvedLines.map(l =>
-        `  ${formatAccount(l)}: $${l.amount.toFixed(2)}${l.customer_ref ? ` [Customer: ${l.customer_ref.name}]` : ""}${l.description ? ` "${l.description}"` : ""}`
-      ),
+      ...resolvedLines.map(formatLine),
       "",
       "Set draft=false to create this expense.",
     ].join("\n");
@@ -262,11 +352,13 @@ export async function handleGetExpense(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        ClassRef?: { value: string; name?: string };
         CustomerRef?: { value: string; name?: string };
         BillableStatus?: string;
       };
       ItemBasedExpenseLineDetail?: {
         ItemRef: { value: string; name?: string };
+        ClassRef?: { value: string; name?: string };
         Qty?: number;
         UnitPrice?: number;
         CustomerRef?: { value: string; name?: string };
@@ -299,13 +391,17 @@ export async function handleGetExpense(
       const acctName = detail.AccountRef.name || detail.AccountRef.value;
       const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
       const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+      const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: ${acctName}${deptStr}${classStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     } else if (line.ItemBasedExpenseLineDetail) {
       const detail = line.ItemBasedExpenseLineDetail;
       const itemName = detail.ItemRef.name || detail.ItemRef.value;
+      const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
+      const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+      const priceStr = detail.UnitPrice !== undefined ? ` x $${detail.UnitPrice.toFixed(2)}` : '';
       const descStr = line.Description ? ` "${line.Description}"` : '';
-      lines.push(`  Line ${line.Id}: Item: ${itemName} (Qty: ${detail.Qty || 1}) $${line.Amount.toFixed(2)}${descStr}`);
+      lines.push(`  Line ${line.Id}: Item: ${itemName} (Qty: ${detail.Qty ?? 1}${priceStr})${classStr}${custStr} $${line.Amount.toFixed(2)}${descStr}`);
     }
   }
 
@@ -353,8 +449,20 @@ export async function handleEditExpense(
       AccountBasedExpenseLineDetail?: {
         AccountRef: { value: string; name?: string };
         DepartmentRef?: { value: string; name?: string };
+        ClassRef?: { value: string; name?: string };
         CustomerRef?: { value: string; name?: string };
         BillableStatus?: string;
+      };
+      // A fetched line may be item-based. The runtime spread preserved that all
+      // along; the compiler could not see it, which is how this path came to
+      // coerce every line to account-based and ship a dual-detail payload.
+      ItemBasedExpenseLineDetail?: {
+        ItemRef: { value: string; name?: string };
+        ClassRef?: { value: string; name?: string };
+        CustomerRef?: { value: string; name?: string };
+        BillableStatus?: string;
+        Qty?: number;
+        UnitPrice?: number;
       };
     }>;
   };
@@ -421,7 +529,10 @@ export async function handleEditExpense(
   let finalLines = [...((updated.Line as typeof current.Line) || current.Line)];
 
   if (lineChanges && lineChanges.length > 0) {
-    const acctCache = await getAccountCache(client);
+    const [acctCache, classCacheData] = await Promise.all([
+      getAccountCache(client),
+      getClassCache(client),
+    ]);
 
     const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
 
@@ -435,24 +546,115 @@ export async function handleEditExpense(
         if (change.delete) {
           finalLines.splice(lineIndex, 1);
         } else {
+          const label = `Line ${change.line_id}`;
           const line = { ...finalLines[lineIndex] };
-          const detail = { ...(line.AccountBasedExpenseLineDetail || {}) } as {
-            AccountRef: { value: string; name?: string };
-            DepartmentRef?: { value: string; name?: string };
-            CustomerRef?: { value: string; name?: string };
-            BillableStatus?: string;
+
+          // Decide which detail this line ends up as BEFORE mutating anything —
+          // see the same block in bill.ts. Coercing unconditionally is what used
+          // to leave an item line carrying both details.
+          const itemInput = change.item_id ?? change.item_name;
+          const clearingItem = itemInput !== undefined && itemInput.trim() === "";
+          if (itemInput !== undefined && !clearingItem && change.account_name !== undefined) {
+            throw new Error(`${label} names both an item and an account — a line posts against one or the other`);
+          }
+          if (clearingItem && change.account_name === undefined) {
+            throw new Error(
+              `${label}: clearing the item needs an account_name in the same change — ` +
+              `a line cannot have neither.`
+            );
+          }
+          const becomesItem = clearingItem
+            ? false
+            : itemInput !== undefined
+              ? true
+              : change.account_name !== undefined
+                ? false
+                : Boolean(line.ItemBasedExpenseLineDetail);
+
+          if (change.description !== undefined) line.Description = change.description;
+
+          const classRef = resolveClassInput(classCacheData, change, label);
+          const customerRef = await resolveCustomerInput(client, change, label);
+
+          // ClassRef, CustomerRef and BillableStatus all live on BOTH detail
+          // types, so a line that only changes which detail it uses keeps them.
+          // Seeding the target detail with them is what makes the conversion
+          // symmetric — carrying class one way and dropping the customer the
+          // other is the same silent loss this branch exists to prevent.
+          const existingDetail = line.ItemBasedExpenseLineDetail ?? line.AccountBasedExpenseLineDetail;
+          const carried = {
+            ...(existingDetail?.ClassRef && { ClassRef: existingDetail.ClassRef }),
+            ...(existingDetail?.CustomerRef && { CustomerRef: existingDetail.CustomerRef }),
+            ...(existingDetail?.BillableStatus && { BillableStatus: existingDetail.BillableStatus }),
           };
 
+          if (becomesItem) {
+            const detail = {
+              ...carried,
+              ...(line.ItemBasedExpenseLineDetail || {}),
+            } as NonNullable<typeof line.ItemBasedExpenseLineDetail>;
+
+            if (itemInput !== undefined) {
+              const itemRef = await resolveItemInput(client, change, label);
+              if (itemRef) detail.ItemRef = itemRef;
+            }
+            if (!detail.ItemRef) {
+              throw new Error(`${label} needs an item_name to become an item-based line`);
+            }
+            if (change.qty !== undefined) detail.Qty = change.qty;
+
+            // Amount and UnitPrice move together or QBO rejects the pair with
+            // fault 6070. Pass the line's own Qty through; never write the
+            // helper's default back onto a line that carried none.
+            if (change.amount !== undefined || change.qty !== undefined) {
+              const { unitPriceDollars, amountCents } = resolveItemLineAmount(
+                {
+                  amount: change.amount ?? line.Amount,
+                  qty: detail.Qty,
+                  unit_price: change.unit_price,
+                },
+                label
+              );
+              line.Amount = toDollars(amountCents);
+              detail.UnitPrice = unitPriceDollars;
+            }
+
+            if (classRef === null) delete detail.ClassRef;
+            else if (classRef) detail.ClassRef = classRef;
+
+            if (customerRef === null) {
+              delete detail.CustomerRef;
+            } else if (customerRef) {
+              detail.CustomerRef = customerRef;
+              detail.BillableStatus = detail.BillableStatus ?? "NotBillable";
+            }
+
+            line.ItemBasedExpenseLineDetail = detail;
+            delete line.AccountBasedExpenseLineDetail;
+            line.DetailType = 'ItemBasedExpenseLineDetail';
+            finalLines[lineIndex] = line;
+            continue;
+          }
+
+          const detail = {
+            ...carried,
+            ...(line.AccountBasedExpenseLineDetail || {}),
+          } as NonNullable<typeof line.AccountBasedExpenseLineDetail>;
+
           if (change.amount !== undefined) {
-            const amountCents = validateAmount(change.amount, `Line ${change.line_id}`);
+            const amountCents = validateAmount(change.amount, label);
             line.Amount = toDollars(amountCents);
           }
-          if (change.description !== undefined) line.Description = change.description;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
+          if (!detail.AccountRef) {
+            throw new Error(`${label} needs an account_name to become an account-based line`);
+          }
+
+          if (classRef === null) delete detail.ClassRef;
+          else if (classRef) detail.ClassRef = classRef;
 
           // Spreading the existing detail already preserves CustomerRef; only an
           // explicit customer input changes it, and an empty one clears it.
-          const customerRef = await resolveCustomerInput(client, change, `Line ${change.line_id}`);
           if (customerRef === null) {
             delete detail.CustomerRef;
           } else if (customerRef) {
@@ -461,30 +663,56 @@ export async function handleEditExpense(
           }
 
           line.AccountBasedExpenseLineDetail = detail;
+          delete line.ItemBasedExpenseLineDetail;
           line.DetailType = 'AccountBasedExpenseLineDetail';
           finalLines[lineIndex] = line;
         }
       } else {
         if (!change.amount || !change.account_name) {
-          throw new Error('New lines require amount and account_name');
+          throw new Error('New lines require an item_name or an account_name');
+        }
+        if ((change.item_id ?? change.item_name) && change.account_name) {
+          throw new Error('A new line names both an item and an account — a line posts against one or the other');
         }
 
-        // Validate and normalize the amount
-        const amountCents = validateAmount(change.amount, `New line for ${change.account_name}`);
-
-        const newCustomer = await resolveCustomerInput(
-          client,
-          change,
-          `New line for ${change.account_name}`
-        );
+        const newItemInput = change.item_id ?? change.item_name;
+        const label = `New line for ${newItemInput || change.account_name}`;
+        const newClassRef = resolveClassInput(classCacheData, change, label);
+        const newCustomer = await resolveCustomerInput(client, change, label);
 
         // Id omitted for new lines - QB will assign
+        if (newItemInput) {
+          const itemRef = await resolveItemInput(client, change, label);
+          const { qty, unitPriceDollars, amountCents } = resolveItemLineAmount(change, label);
+          finalLines.push({
+            Amount: toDollars(amountCents),
+            Description: change.description,
+            DetailType: 'ItemBasedExpenseLineDetail',
+            ItemBasedExpenseLineDetail: {
+              ItemRef: itemRef!,
+              Qty: qty,
+              UnitPrice: unitPriceDollars,
+              ...(newClassRef && { ClassRef: newClassRef }),
+              ...(newCustomer && {
+                CustomerRef: newCustomer,
+                BillableStatus: "NotBillable",
+              }),
+            },
+          } as unknown as typeof finalLines[0]);
+          continue;
+        }
+
+        if (!change.amount) {
+          throw new Error(`${label} requires an amount`);
+        }
+        const amountCents = validateAmount(change.amount, label);
         const newLine = {
           Amount: toDollars(amountCents),
           Description: change.description,
           DetailType: 'AccountBasedExpenseLineDetail',
           AccountBasedExpenseLineDetail: {
-            AccountRef: resolveAcct(change.account_name),
+            AccountRef: resolveAcct(change.account_name!),
+            ...(newClassRef && { ClassRef: newClassRef }),
             ...(newCustomer && {
               CustomerRef: newCustomer,
               BillableStatus: "NotBillable",
@@ -530,14 +758,21 @@ export async function handleEditExpense(
     if (updated.Line) {
       previewLines.push('');
       previewLines.push('Updated Lines:');
+      // Read off the built payload, not the inputs — that is what makes
+      // preserve-on-omit visible before the caller sets draft=false. Item lines
+      // were skipped entirely by the account-only guard this replaces.
       for (const line of updated.Line as typeof finalLines) {
-        const detail = line.AccountBasedExpenseLineDetail;
-        if (detail) {
-          const acctName = detail.AccountRef.name || detail.AccountRef.value;
-          const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
-          const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
-          previewLines.push(`  ${acctName}${deptStr}${custStr}: $${line.Amount.toFixed(2)}`);
-        }
+        const item = line.ItemBasedExpenseLineDetail;
+        const acct = line.AccountBasedExpenseLineDetail;
+        const detail = item ?? acct;
+        if (!detail) continue;
+        const label = item
+          ? `Item: ${item.ItemRef.name || item.ItemRef.value}${item.Qty && item.Qty !== 1 ? ` (Qty: ${item.Qty} x $${(item.UnitPrice ?? 0).toFixed(2)})` : ''}`
+          : `${acct!.AccountRef.name || acct!.AccountRef.value}`;
+        const deptStr = acct?.DepartmentRef?.name ? ` [${acct.DepartmentRef.name}]` : '';
+        const classStr = detail.ClassRef?.name ? ` [Class: ${detail.ClassRef.name}]` : '';
+        const custStr = detail.CustomerRef?.name ? ` [Customer: ${detail.CustomerRef.name}]` : '';
+        previewLines.push(`  ${label}${deptStr}${classStr}${custStr}: $${line.Amount.toFixed(2)}`);
       }
     }
 

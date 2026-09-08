@@ -20,9 +20,10 @@
 // a blank name.
 
 import QuickBooks from "node-quickbooks";
-import { getVendorCache, getEmployeeCache, resolveCustomer } from "./cache.js";
-import { resolveVendorRef, resolveEmployeeRef, normalizeEntityKind } from "./refs.js";
+import { getVendorCache, getEmployeeCache, resolveCustomer, resolveItem } from "./cache.js";
+import { resolveVendorRef, resolveEmployeeRef, resolveClassRef, normalizeEntityKind } from "./refs.js";
 import type { EntityKind, ResolvedEntityRef } from "./refs.js";
+import type { ClassCache } from "../types/index.js";
 
 // Resolve a name or id against the name list for `kind`.
 //
@@ -88,6 +89,16 @@ export interface CustomerLineInput {
   customer_id?: string;
 }
 
+export interface ItemLineInput {
+  item_name?: string;
+  item_id?: string;
+}
+
+export interface ClassLineInput {
+  class_name?: string;
+  class_id?: string;
+}
+
 // Errors are re-thrown with the caller's label so "Vendor not found" says which
 // line it came from.
 function withLabel(label: string, err: unknown): Error {
@@ -106,6 +117,42 @@ export async function resolveEntityInput(
   if (raw.trim() === "") return null;
   try {
     return await resolveEntityRef(client, raw, normalizeEntityKind(input.entity_type));
+  } catch (err) {
+    throw withLabel(label, err);
+  }
+}
+
+// Resolve an item_name/item_id pair for the expense line details that can post
+// against an Item instead of an Account. Async because items are looked up
+// lazily by query rather than bulk-cached.
+export async function resolveItemInput(
+  client: QuickBooks,
+  input: ItemLineInput,
+  label: string
+): Promise<EntityInputResult<{ value: string; name: string }>> {
+  const raw = input.item_id ?? input.item_name;
+  if (raw === undefined) return undefined;
+  if (raw.trim() === "") return null;
+  try {
+    return await resolveItem(client, raw);
+  } catch (err) {
+    throw withLabel(label, err);
+  }
+}
+
+// Resolve a class_name/class_id pair. Synchronous, unlike the item and customer
+// inputs, because classes are bulk-cached and the handler already has the cache
+// in hand from its opening Promise.all.
+export function resolveClassInput(
+  cache: ClassCache,
+  input: ClassLineInput,
+  label: string
+): EntityInputResult<{ value: string; name: string }> {
+  const raw = input.class_id ?? input.class_name;
+  if (raw === undefined) return undefined;
+  if (raw.trim() === "") return null;
+  try {
+    return resolveClassRef(cache, raw);
   } catch (err) {
     throw withLabel(label, err);
   }

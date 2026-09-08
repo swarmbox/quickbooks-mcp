@@ -309,11 +309,11 @@ QBO_INLINE_OUTPUT=true
 | `get_journal_entry` | Fetch a journal entry by ID |
 | `edit_journal_entry` | Modify an existing journal entry |
 | **Bills** | |
-| `create_bill` | Create a vendor bill (lines take `customer_name`) |
+| `create_bill` | Create a vendor bill (lines take an account or an item, plus `class_name` and `customer_name`) |
 | `get_bill` | Fetch a bill by ID |
 | `edit_bill` | Modify an existing bill |
 | **Expenses** | |
-| `create_expense` | Create an expense (Cash, Check, or Credit Card; payee may be a vendor, customer, or employee) |
+| `create_expense` | Create an expense (Cash, Check, or Credit Card; payee may be a vendor, customer, or employee; lines take an account or an item, plus `class_name`) |
 | `get_expense` | Fetch an expense by ID |
 | `edit_expense` | Modify an existing expense |
 | **Sales Receipts** | |
@@ -353,6 +353,8 @@ actually store there:
 | `customer_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_vendor_credit` / `edit_vendor_credit` lines | Customer only — QuickBooks stores a `CustomerRef` on these lines and has no vendor or employee option. |
 | `vendor_name` | `create_bill`, `create_vendor_credit`, `create_bill_payment` headers | Vendor only. |
 | `customer_name` (header) | `create_invoice`, `create_sales_receipt` | Customer only. Their item lines have no per-line entity. |
+| `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. |
+| `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
 
 Each also has an `_id` form (`entity_id`, `customer_id`) if you already know the
 internal ID. On edit tools, the rule for line parameters is:
