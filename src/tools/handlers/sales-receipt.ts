@@ -11,7 +11,7 @@ import {
   resolveAccountRef,
   toQboRef,
 } from "../../client/index.js";
-import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
+import { buildQboUrl, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
 
 interface SalesReceiptLineChange {
   line_id?: string;
@@ -112,18 +112,10 @@ export async function handleCreateSalesReceipt(
 
     const itemRef = await resolveItem(client, itemInput);
 
-    const qty = line.qty ?? 1;
-    let amountCents: number;
-    let unitPriceDollars: number;
-
-    if (line.amount !== undefined) {
-      amountCents = validateAmount(line.amount, `Line for ${itemRef.name}`);
-      unitPriceDollars = toDollars(amountCents) / qty;
-    } else {
-      const upCents = validateAmount(line.unit_price!, `Line unit_price for ${itemRef.name}`);
-      unitPriceDollars = toDollars(upCents);
-      amountCents = upCents * qty;
-    }
+    const { qty, unitPriceDollars, amountCents } = resolveItemLineAmount(
+      { amount: line.amount, qty: line.qty, unit_price: line.unit_price },
+      `Line for ${itemRef.name}`
+    );
 
     return {
       itemRef,
@@ -392,12 +384,15 @@ export async function handleEditSalesReceipt(
           };
 
           if (change.amount !== undefined) {
-            const amountCents = validateAmount(change.amount, `Line ${change.line_id}`);
-            line.Amount = toDollars(amountCents);
-            // Update UnitPrice to match if Qty is 1 (common case)
-            if (detail.Qty === 1 || detail.Qty === undefined) {
-              detail.UnitPrice = toDollars(amountCents);
-            }
+            // Recompute UnitPrice against the Qty already on the fetched line.
+            // Skipping this for Qty > 1 ships Amount != Qty * UnitPrice, which
+            // is what QBO rejects with fault 6070.
+            const resolved = resolveItemLineAmount(
+              { amount: change.amount, qty: detail.Qty },
+              `Line ${change.line_id}`
+            );
+            line.Amount = toDollars(resolved.amountCents);
+            detail.UnitPrice = resolved.unitPriceDollars;
           }
           if (change.description !== undefined) line.Description = change.description;
 
@@ -417,18 +412,10 @@ export async function handleEditSalesReceipt(
 
         const itemRef = await resolveItem(client, itemInput);
 
-        const qty = change.qty ?? 1;
-        let amountCents: number;
-        let unitPriceDollars: number;
-
-        if (change.amount !== undefined) {
-          amountCents = validateAmount(change.amount, `New line for ${itemRef.name}`);
-          unitPriceDollars = toDollars(amountCents) / qty;
-        } else {
-          const upCents = validateAmount(change.unit_price!, `New line unit_price for ${itemRef.name}`);
-          unitPriceDollars = toDollars(upCents);
-          amountCents = upCents * qty;
-        }
+        const { qty, unitPriceDollars, amountCents } = resolveItemLineAmount(
+          { amount: change.amount, qty: change.qty, unit_price: change.unit_price },
+          `New line for ${itemRef.name}`
+        );
 
         const newLine = {
           DetailType: 'SalesItemLineDetail',
