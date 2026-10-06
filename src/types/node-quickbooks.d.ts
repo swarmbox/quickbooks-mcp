@@ -38,6 +38,7 @@ declare module "node-quickbooks" {
 
     // Company
     getCompanyInfo(realmId: string, callback: Callback<unknown>): void;
+    getPreferences(callback: Callback<unknown>): void;
 
     // Generic finder methods - accept query strings or criteria objects
     findCustomers(criteria: object | string, callback: Callback<unknown>): void;
