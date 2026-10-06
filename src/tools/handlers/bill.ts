@@ -1,6 +1,7 @@
 // Handlers for bill tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -401,6 +402,7 @@ export async function handleGetBill(
     }
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'Bill', bill.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

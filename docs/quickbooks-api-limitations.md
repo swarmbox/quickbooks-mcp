@@ -467,6 +467,67 @@ possible, and validate any free-text value before passing it. Note that
 so it is not a safe source of ids on its own; `resolveCustomer` and
 `resolveVendor` throw instead.
 
+## Attachable (Attachments) Quirks
+
+Attachments are the `Attachable` entity. A file upload and a text note are the
+same entity; a note simply has no file. These items come from Intuit's
+[Attachable reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/attachable)
+and [attach images and notes workflow](https://developer.intuit.com/app/developer/qbo/docs/workflows/attach-images-and-notes).
+Intuit's own pages could not be read in full while this was written, so the
+`TempDownloadUri` lifetime and the upload part layout also rely on secondary
+mirrors ([CData Attachables table](https://cdn.cdata.com/help/RNM/odbc/pg_table-attachables.htm),
+[CData UploadAttachment](https://cdn.cdata.com/help/RNN/cis/pg_sp-uploadattachment.htm)).
+
+### Documented
+
+- **Find attachments by linked entity** with a query on the nested reference.
+  The type is the lowercase QBO type and the value is the numeric id:
+
+  ```
+  select * from Attachable where AttachableRef.EntityRef.Type = 'bill' and AttachableRef.EntityRef.value = '42'
+  ```
+
+  (Intuit Attachable reference.)
+- **Delete takes `Id` + `SyncToken` only**, the same minimal body described in
+  the delete section above. `delete_entity` accepts `entity_type: attachable`.
+  (Intuit Attachable reference.)
+- **`Category` is one of seven values**: Contact Photo, Document, Image,
+  Receipt, Signature, Sound, Other. (Intuit Attachable reference.)
+- **`TempDownloadUri` expires after roughly 15 minutes.** It is a signed,
+  short-lived link to the file, so fetch it right before downloading and never
+  store it. (CData Attachables table, secondary mirror.)
+- **An upload is a multipart request** with a `file_metadata_01` JSON part
+  carrying `FileName`, `ContentType` and `AttachableRef`, plus a
+  `file_content_01` part. (Intuit workflow; CData UploadAttachment.)
+
+### Updates are full updates
+
+Intuit documents Attachable updates as full updates: a writable field left out
+of the body is nulled. The read-only fields (`Size`, `TempDownloadUri`,
+`FileAccessUri`, `ThumbnailTempDownloadUri`, `MetaData`, any extension block)
+are rejected if echoed back.
+
+The writable fields are `FileName`, `Note`, `Category`, `ContentType`, `Tag`,
+`Lat`, `Long`, `PlaceName` and `AttachableRef` (each ref: `EntityRef`
+`{type, value}`, optional `IncludeOnSend`, optional `LineInfo`).
+
+### Rule for handlers
+
+Fetch the current attachment, merge the requested changes onto it, then send
+only `Id`, `SyncToken` and the writable fields. Never send a partial body (it
+nulls the rest) and never echo the read.
+
+### Unconfirmed — verify in the sandbox
+
+Not established by the sources above. Tick each off after testing against a
+sandbox company, and move the result into the section above:
+
+- [ ] Is the `AttachableRef.EntityRef.Type` filter case-sensitive (`bill` vs `Bill`)?
+- [ ] Does an update replace `AttachableRef` or merge it with the existing links?
+- [ ] Does a `file_metadata_01` part honor `Note` and `Category` on upload?
+- [ ] What is the official maximum file size?
+- [ ] What is the official list of accepted file types?
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)
@@ -475,3 +536,4 @@ so it is not a safe source of ids on its own; `resolveCustomer` and
 - [JournalEntry API Reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/most-commonly-used/journalentry)
 - [Deposit API Reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/deposit)
 - [Reports API Reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/generalledger)
+- [Attachable API Reference](https://developer.intuit.com/app/developer/qbo/docs/api/accounting/all-entities/attachable)

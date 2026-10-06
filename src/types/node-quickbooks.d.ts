@@ -45,6 +45,21 @@ declare module "node-quickbooks" {
     findAccounts(criteria: object | string, callback: Callback<unknown>): void;
     findInvoices(criteria: object | string, callback: Callback<unknown>): void;
     findBills(criteria: object | string, callback: Callback<unknown>): void;
+
+    // Attachable: an uploaded file or a text-only note, linked to entities
+    // through AttachableRef. `upload` posts multipart to /upload and creates an
+    // unlinked Attachable; links and metadata are set with updateAttachable.
+    upload(
+      filename: string,
+      contentType: string,
+      stream: Buffer | NodeJS.ReadableStream,
+      callback: Callback<unknown>
+    ): void;
+    createAttachable(attachable: object, callback: Callback<unknown>): void;
+    getAttachable(id: string, callback: Callback<unknown>): void;
+    updateAttachable(attachable: object, callback: Callback<unknown>): void;
+    deleteAttachable(idOrEntity: string | object, callback: Callback<unknown>): void;
+    findAttachables(criteria: object | string, callback: Callback<unknown>): void;
     findItems(criteria: object | string, callback: Callback<unknown>): void;
     findDepartments(criteria: object | string, callback: Callback<unknown>): void;
     findJournalEntries(criteria: object | string, callback: Callback<unknown>): void;

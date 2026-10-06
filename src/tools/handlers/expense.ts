@@ -1,6 +1,7 @@
 // Handlers for expense tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -405,6 +406,7 @@ export async function handleGetExpense(
     }
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'Purchase', expense.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

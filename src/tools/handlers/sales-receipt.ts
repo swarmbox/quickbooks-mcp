@@ -1,6 +1,7 @@
 // Handlers for sales receipt tools (get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -264,6 +265,7 @@ export async function handleGetSalesReceipt(
     }
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'SalesReceipt', salesReceipt.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

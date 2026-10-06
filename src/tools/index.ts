@@ -45,6 +45,11 @@ import {
   handleGetCustomer,
   handleEditCustomer,
   handleDeleteEntity,
+  handleUploadAttachment,
+  handleCreateAttachmentNote,
+  handleGetAttachment,
+  handleListAttachments,
+  handleEditAttachment,
   handleAuthenticate,
 } from "./handlers/index.js";
 
@@ -95,6 +100,11 @@ toolHandlers.set("create_customer", (client, args) => handleCreateCustomer(clien
 toolHandlers.set("get_customer", (client, args) => handleGetCustomer(client, args as { id: string }));
 toolHandlers.set("edit_customer", (client, args) => handleEditCustomer(client, args as Parameters<typeof handleEditCustomer>[1]));
 toolHandlers.set("delete_entity", (client, args) => handleDeleteEntity(client, args as Parameters<typeof handleDeleteEntity>[1]));
+toolHandlers.set("upload_attachment", (client, args) => handleUploadAttachment(client, args as Parameters<typeof handleUploadAttachment>[1]));
+toolHandlers.set("create_attachment_note", (client, args) => handleCreateAttachmentNote(client, args as Parameters<typeof handleCreateAttachmentNote>[1]));
+toolHandlers.set("get_attachment", (client, args) => handleGetAttachment(client, args as Parameters<typeof handleGetAttachment>[1]));
+toolHandlers.set("list_attachments", (client, args) => handleListAttachments(client, args as Parameters<typeof handleListAttachments>[1]));
+toolHandlers.set("edit_attachment", (client, args) => handleEditAttachment(client, args as Parameters<typeof handleEditAttachment>[1]));
 
 const schemasByTool = new Map<string, ToolSchema>(
   allToolDefinitions.map((t) => [t.name, t.inputSchema as unknown as ToolSchema])

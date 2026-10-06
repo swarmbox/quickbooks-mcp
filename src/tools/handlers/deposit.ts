@@ -1,6 +1,7 @@
 // Handlers for deposit tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -289,6 +290,7 @@ export async function handleGetDeposit(
     }
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'Deposit', deposit.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 
