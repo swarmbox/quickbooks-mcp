@@ -517,14 +517,32 @@ Fetch the current attachment, merge the requested changes onto it, then send
 only `Id`, `SyncToken` and the writable fields. Never send a partial body (it
 nulls the rest) and never echo the read.
 
+### Confirmed in a sandbox company
+
+Each of these was checked against a sandbox company through the tools
+themselves, then cross-checked by reading the Attachable back:
+
+- **The type filter is case-insensitive.** `AttachableRef.EntityRef.Type = 'bill'`
+  and `= 'Bill'` return the same attachment. The handlers send the lowercase
+  form Intuit documents.
+- **An update replaces `AttachableRef`; it does not merge.** Sending the list
+  without one link removes that link, so `edit_attachment` always sends the
+  complete merged list.
+- **The upload's linking update keeps everything it sends.** After
+  `upload_attachment`, the follow-up update (`Id`, `SyncToken`, `FileName`,
+  `ContentType`, `AttachableRef`, `Note`, `Category`) leaves the file name and
+  content type intact and sets the note and category.
+- **An edit that sends every writable field preserves the unchanged ones.**
+  Changing only the note left `FileName`, `ContentType` and `Category` as
+  they were.
+
 ### Unconfirmed — verify in the sandbox
 
-Not established by the sources above. Tick each off after testing against a
-sandbox company, and move the result into the section above:
+Not established by the sources above or the sandbox check. Tick each off after
+testing against a sandbox company, and move the result into a section above:
 
-- [ ] Is the `AttachableRef.EntityRef.Type` filter case-sensitive (`bill` vs `Bill`)?
-- [ ] Does an update replace `AttachableRef` or merge it with the existing links?
-- [ ] Does a `file_metadata_01` part honor `Note` and `Category` on upload?
+- [ ] Does a `file_metadata_01` part honor `Note` and `Category` on upload? The
+      handlers do not use one: they set both in the linking update instead.
 - [ ] What is the official maximum file size?
 - [ ] What is the official list of accepted file types?
 
