@@ -338,7 +338,19 @@ QBO_INLINE_OUTPUT=true
 | `create_transfer` | Move money between two of the company's own accounts (bank↔bank, credit-card paydown) |
 | `get_bill_payment` | Fetch a bill payment by ID; flags unapplied amounts |
 | **Delete** | |
-| `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) |
+| `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) or an attachment (`entity_type: attachable`) |
+| **Attachments** | |
+| `upload_attachment` | Upload a file (PDF, image, spreadsheet, etc.) and attach it to one or more transactions or entities; warns when a same-named file is already attached |
+| `create_attachment_note` | Attach a text note (no file) to one or more transactions or entities |
+| `get_attachment` | Fetch an attachment by ID: file name, size, note, category, links, and a temporary download URL (`download: true` saves the file locally in stdio mode) |
+| `list_attachments` | List the attachments linked to one transaction or entity |
+| `edit_attachment` | Edit an attachment's note, category or file name, and add, remove or re-flag its links |
+
+### Attachments
+
+`upload_attachment` and `create_attachment_note` are draft-by-default like every other write. The nine `get_*` transaction tools also show an Attachments section for the record they fetch.
+
+Provide the file as `file_path` (stdio only) or as `file_content_base64` plus `file_name` (required over HTTP). Over HTTP the base64 payload passes through the model's context and Lambda's 6 MB request limit applies, so `file_content_base64` carries at most about 4.4 MB of file data. Use stdio mode for larger files.
 
 ### Naming Vendors, Customers, and Employees
 

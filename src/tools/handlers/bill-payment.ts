@@ -6,6 +6,7 @@
 // directly and does NOT touch existing bills.
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -314,6 +315,7 @@ export async function handleGetBillPayment(
       : `*** OVER-APPLIED: applied lines exceed payment total by $${formatDollars(-unappliedCents)}`);
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'BillPayment', bp.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

@@ -2113,4 +2113,243 @@ export const toolDefinitions = [
       required: ["id"],
     },
   },
+  {
+    name: "upload_attachment",
+    description: "WRITE: Upload a file (PDF, image, spreadsheet, etc.) and attach it to one or more transactions or entities. Draft is the default: draft=true previews the upload and any same-named file already on a target; set draft=false to upload. Provide the file as file_path (stdio only; a path on the machine running the server) or as file_content_base64 with file_name (required over HTTP). Over HTTP the base64 payload passes through the model's context and Lambda's 6 MB request limit applies, so the file can be at most about 4.4 MB. QuickBooks accepts files up to 100 MB. Returns the new attachment id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        file_path: {
+          type: "string",
+          description: "Path to a local file (stdio mode only). Not allowed with file_content_base64.",
+        },
+        file_content_base64: {
+          type: "string",
+          description: "Base64-encoded file content (use over HTTP; at most about 4.4 MB of file data). Requires file_name. Not allowed with file_path.",
+        },
+        file_name: {
+          type: "string",
+          description: "File name to store, including extension (e.g., 'statement.pdf'). Required with file_content_base64; defaults to the base name of file_path.",
+        },
+        content_type: {
+          type: "string",
+          description: "MIME type (e.g., 'application/pdf'). Inferred from the file extension when omitted.",
+        },
+        links: {
+          type: "array",
+          description: "Transactions or entities to attach the file to. Omit to upload an unlinked file.",
+          items: {
+            type: "object",
+            properties: {
+              entity_type: {
+                type: "string",
+                description: "Type of the target, e.g. bill, invoice, expense, journal_entry, deposit, vendor_credit, sales_receipt, bill_payment, estimate, credit_memo, payment, refund_receipt, purchase_order, transfer, vendor, customer, employee, item.",
+              },
+              entity_id: {
+                type: "string",
+                description: "ID of the target entity.",
+              },
+              include_on_send: {
+                type: "boolean",
+                description: "Include the file when the target is emailed (sales transactions only).",
+              },
+            },
+            required: ["entity_type", "entity_id"],
+          },
+        },
+        note: {
+          type: "string",
+          description: "Optional note stored with the file.",
+        },
+        category: {
+          type: "string",
+          description: "Attachment category: Contact Photo, Document, Image, Receipt, Signature, Sound, or Other.",
+        },
+        allow_duplicate: {
+          type: "boolean",
+          description: "If true, upload even when a file with the same name is already attached to a target (default: false).",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, show a preview without uploading (default: true)",
+        },
+      },
+    },
+  },
+  {
+    name: "create_attachment_note",
+    description: "WRITE: Attach a text note (no file) to one or more transactions or entities. Draft is the default: draft=true previews the note; set draft=false to create it. Returns the new attachment id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        note: {
+          type: "string",
+          description: "The note text.",
+        },
+        links: {
+          type: "array",
+          description: "Transactions or entities to attach the note to (at least one).",
+          items: {
+            type: "object",
+            properties: {
+              entity_type: {
+                type: "string",
+                description: "Type of the target, e.g. bill, invoice, expense, journal_entry, deposit, vendor_credit, sales_receipt, bill_payment, estimate, credit_memo, payment, refund_receipt, purchase_order, transfer, vendor, customer, employee, item.",
+              },
+              entity_id: {
+                type: "string",
+                description: "ID of the target entity.",
+              },
+              include_on_send: {
+                type: "boolean",
+                description: "Include the note when the target is emailed (sales transactions only).",
+              },
+            },
+            required: ["entity_type", "entity_id"],
+          },
+        },
+        category: {
+          type: "string",
+          description: "Attachment category: Contact Photo, Document, Image, Receipt, Signature, Sound, or Other.",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, show a preview without creating (default: true)",
+        },
+      },
+      required: ["note", "links"],
+    },
+  },
+  {
+    name: "get_attachment",
+    description: "Read one attachment by ID: file name, size, note, category, what it is linked to, and a temporary download URL. Set download=true (or save_to) to save the file locally in stdio mode. Read-only; to change an attachment use edit_attachment.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The attachment (Attachable) ID.",
+        },
+        download: {
+          type: "boolean",
+          description: "If true, download the file to a new temporary directory (stdio mode only).",
+        },
+        save_to: {
+          type: "string",
+          description: "Local path to save the file to (stdio mode only). Implies download.",
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "list_attachments",
+    description: "List the attachments linked to one transaction or entity. Read-only. For other Attachable searches (by file name, category, and so on), use the query tool.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_type: {
+          type: "string",
+          description: "Type of the entity, e.g. bill, invoice, expense, journal_entry, deposit, vendor_credit, sales_receipt, bill_payment, estimate, credit_memo, payment, refund_receipt, purchase_order, transfer, vendor, customer, employee, item.",
+        },
+        entity_id: {
+          type: "string",
+          description: "ID of the entity.",
+        },
+      },
+      required: ["entity_type", "entity_id"],
+    },
+  },
+  {
+    name: "edit_attachment",
+    description: "WRITE: Edit an attachment's note, category or file name, and add, remove or re-flag its links. Draft is the default: draft=true shows the attachment before and after; set draft=false to apply. To delete an attachment use delete_entity with entity_type attachable. Returns the attachment id.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The attachment (Attachable) ID to edit.",
+        },
+        note: {
+          type: "string",
+          description: "New note text.",
+        },
+        category: {
+          type: "string",
+          description: "New category: Contact Photo, Document, Image, Receipt, Signature, Sound, or Other.",
+        },
+        file_name: {
+          type: "string",
+          description: "New file name (file attachments only).",
+        },
+        add_links: {
+          type: "array",
+          description: "Links to add.",
+          items: {
+            type: "object",
+            properties: {
+              entity_type: {
+                type: "string",
+                description: "Type of the target, e.g. bill, invoice, expense, journal_entry.",
+              },
+              entity_id: {
+                type: "string",
+                description: "ID of the target entity.",
+              },
+              include_on_send: {
+                type: "boolean",
+                description: "Include the attachment when the target is emailed (sales transactions only).",
+              },
+            },
+            required: ["entity_type", "entity_id"],
+          },
+        },
+        remove_links: {
+          type: "array",
+          description: "Links to remove. An attachment must keep at least one link; use delete_entity to remove it entirely.",
+          items: {
+            type: "object",
+            properties: {
+              entity_type: {
+                type: "string",
+                description: "Type of the linked entity.",
+              },
+              entity_id: {
+                type: "string",
+                description: "ID of the linked entity.",
+              },
+            },
+            required: ["entity_type", "entity_id"],
+          },
+        },
+        set_include_on_send: {
+          type: "array",
+          description: "Set include_on_send on existing links (true when omitted on an item).",
+          items: {
+            type: "object",
+            properties: {
+              entity_type: {
+                type: "string",
+                description: "Type of the linked entity.",
+              },
+              entity_id: {
+                type: "string",
+                description: "ID of the linked entity.",
+              },
+              include_on_send: {
+                type: "boolean",
+                description: "Whether to include the attachment when the entity is emailed.",
+              },
+            },
+            required: ["entity_type", "entity_id"],
+          },
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, show a before/after preview without saving (default: true)",
+        },
+      },
+      required: ["id"],
+    },
+  },
 ];

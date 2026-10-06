@@ -1,6 +1,7 @@
 // Handlers for customer tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import { promisify, promisifyWrite, resolveCustomer } from "../../client/index.js";
 import { buildQboUrl, outputReport, formatUpdateResult } from "../../utils/index.js";
 
@@ -260,6 +261,7 @@ export async function handleGetCustomer(
   if (customer.BalanceWithJobs !== undefined && customer.BalanceWithJobs !== customer.Balance) {
     lines.push(`Balance (with jobs): $${customer.BalanceWithJobs.toFixed(2)}`);
   }
+  lines.push("", ...(await formatAttachmentLines(client, "Customer", customer.Id)));
   lines.push("");
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

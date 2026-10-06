@@ -1,6 +1,7 @@
 // Handlers for invoice tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -316,6 +317,7 @@ export async function handleGetInvoice(
     }
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'Invoice', invoice.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 

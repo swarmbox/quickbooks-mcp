@@ -1,6 +1,7 @@
 // Handlers for journal entry tools (create, get, edit)
 
 import QuickBooks from "node-quickbooks";
+import { formatAttachmentLines } from "./attachment.js";
 import {
   promisify,
   promisifyWrite,
@@ -299,6 +300,7 @@ export async function handleGetJournalEntry(
     lines.push(`  Line ${line.Id}: ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${entityStr} $${line.Amount.toFixed(2)}${descStr}`);
   }
 
+  lines.push('', ...(await formatAttachmentLines(client, 'JournalEntry', je.Id)));
   lines.push('');
   lines.push(`View in QuickBooks: ${qboUrl}`);
 
