@@ -189,7 +189,6 @@ Both builds must pass before committing. After changes, restart Claude Code to r
 
 ## Workflow
 
-- Feature backlog is tracked in `wmc-reconcile/docs/quickbooks-mcp-backlog.md` — move items to Completed when done
 - Use `closes #N` in commit messages to auto-close GitHub issues
 - Commit messages: short imperative subject, body explains the "why"
 
