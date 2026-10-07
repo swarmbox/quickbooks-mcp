@@ -310,9 +310,9 @@ QBO_INLINE_OUTPUT=true
 | `get_journal_entry` | Fetch a journal entry by ID |
 | `edit_journal_entry` | Modify an existing journal entry |
 | **Bills** | |
-| `create_bill` | Create a vendor bill (lines take an account or an item, plus `class_name` and `customer_name`) |
-| `get_bill` | Fetch a bill by ID |
-| `edit_bill` | Modify an existing bill |
+| `create_bill` | Create a vendor bill (lines take an account or an item, plus `class_name` and `customer_name`; `sales_term_ref` sets payment terms and computes the due date when `due_date` is omitted) |
+| `get_bill` | Fetch a bill by ID, including its payment terms |
+| `edit_bill` | Modify an existing bill (`sales_term_ref` changes its payment terms and recomputes the due date unless `due_date` is given) |
 | **Expenses** | |
 | `create_expense` | Create an expense (Cash, Check, or Credit Card; payee may be a vendor, customer, or employee; lines take an account or an item, plus `class_name`) |
 | `get_expense` | Fetch an expense by ID |
@@ -368,6 +368,7 @@ actually store there:
 | `customer_name` (header) | `create_invoice`, `create_sales_receipt` | Customer only. Their item lines have no per-line entity. |
 | `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. |
 | `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
+| `sales_term_ref` | `create_bill` / `edit_bill`, `create_invoice` / `edit_invoice`, `create_customer` / `edit_customer` headers | A Term, by exact name (case-insensitive) or Id; a miss lists the available names. On bills a missing `due_date` is computed from it (`txn_date` plus the term's days); an explicit `due_date` is kept, and date-driven terms need `due_date`. |
 
 Each also has an `_id` form (`entity_id`, `customer_id`) if you already know the
 internal ID. On edit tools, the rule for line parameters is:
@@ -411,7 +412,6 @@ The server automatically refreshes OAuth tokens on each request and persists the
 ```bash
 npm run dev      # Run in development mode
 npm run build    # Build
-npm run typecheck # Type check
 npm test         # Run the test suite
 ```
 

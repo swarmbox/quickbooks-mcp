@@ -8,12 +8,14 @@ import {
   CachedClass,
   CachedDepartment,
   CachedVendor,
+  CachedTerm,
   CachedEmployee,
   CachedItem,
   AccountCache,
   ClassCache,
   DepartmentCache,
   VendorCache,
+  TermCache,
   EmployeeCache,
   QBQueryResponse,
 } from "../types/index.js";
@@ -27,6 +29,7 @@ let classCache: ClassCache | null = null;
 let accountCache: AccountCache | null = null;
 let vendorCache: VendorCache | null = null;
 let employeeCache: EmployeeCache | null = null;
+let termCache: TermCache | null = null;
 // Item cache: lazy per-entry lookup (not bulk-loaded like others)
 const itemCacheById = new Map<string, CachedItem>();
 const itemCacheByName = new Map<string, CachedItem>(); // lowercase key
@@ -40,6 +43,7 @@ export function clearLookupCache(): void {
   accountCache = null;
   vendorCache = null;
   employeeCache = null;
+  termCache = null;
   itemCacheById.clear();
   itemCacheByName.clear();
   customerCacheById.clear();
@@ -161,6 +165,45 @@ export async function getVendorCache(client: QuickBooks): Promise<VendorCache> {
 
   vendorCache = { items, byId, byName, fetchedAt: Date.now() };
   return vendorCache;
+}
+
+// Payment terms are a short list, so they are bulk-loaded like vendors. Inactive
+// terms are included: a bill can still carry one, and describeTermRef needs its name.
+export async function getTermCache(client: QuickBooks): Promise<TermCache> {
+  if (termCache && (Date.now() - termCache.fetchedAt) < LOOKUP_CACHE_TTL_MS) {
+    return termCache;
+  }
+
+  const result = await promisify<unknown>((cb) => client.findTerms({ fetchAll: true }, cb));
+  const items = extractQueryResults<CachedTerm>(result, 'Term');
+
+  const byId = new Map<string, CachedTerm>();
+  const byName = new Map<string, CachedTerm>();
+  for (const term of items) {
+    byId.set(term.Id, term);
+    byName.set(term.Name.toLowerCase(), term);
+  }
+
+  termCache = { items, byId, byName, fetchedAt: Date.now() };
+  return termCache;
+}
+
+// Label for a SalesTermRef on a read or preview. A bill's raw SalesTermRef
+// carries only `value`, so the name has to come from the term list. A failed
+// lookup degrades to a label rather than failing the read, as
+// formatAttachmentLines does for attachments.
+export async function describeTermRef(
+  client: QuickBooks,
+  ref: { value?: string; name?: string } | null | undefined,
+): Promise<string> {
+  if (!ref?.value) return "(none)";
+  if (ref.name) return ref.name;
+  try {
+    const term = (await getTermCache(client)).byId.get(ref.value);
+    return term ? term.Name : `id ${ref.value} (inactive or unknown term)`;
+  } catch {
+    return `id ${ref.value} (name could not be loaded)`;
+  }
 }
 
 export async function getEmployeeCache(client: QuickBooks): Promise<EmployeeCache> {

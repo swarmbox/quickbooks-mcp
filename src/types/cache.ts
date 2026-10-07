@@ -65,6 +65,21 @@ export interface VendorCache {
   fetchedAt: number;
 }
 
+export interface CachedTerm {
+  Id: string;
+  Name: string;
+  Type?: string;     // "STANDARD" (due DueDays after the txn date) | "DATE_DRIVEN"
+  DueDays?: number;
+  Active?: boolean;
+}
+
+export interface TermCache {
+  items: CachedTerm[];
+  byId: Map<string, CachedTerm>;
+  byName: Map<string, CachedTerm>;         // lowercase key
+  fetchedAt: number;
+}
+
 export interface CachedEmployee {
   Id: string;
   DisplayName: string;
