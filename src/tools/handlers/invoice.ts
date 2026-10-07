@@ -9,6 +9,10 @@ import {
   getDepartmentCache,
   resolveItem,
   resolveCustomer,
+  getTermCache,
+  resolveTermRef,
+  describeTermRef,
+  toQboRef,
 } from "../../client/index.js";
 import { buildQboUrl, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
 
@@ -103,19 +107,7 @@ export async function handleCreateInvoice(
   // Resolve sales term (optional)
   let salesTermRef: { value: string; name: string } | undefined;
   if (sales_term_ref) {
-    const terms = await promisify<{ QueryResponse: { Term?: Array<{ Id: string; Name: string }> } }>((cb) =>
-      (client as unknown as Record<string, Function>).findTerms(cb)
-    );
-    const termList = terms.QueryResponse?.Term || [];
-    const match = termList.find(t =>
-      t.Name.toLowerCase() === sales_term_ref.toLowerCase() ||
-      t.Id === sales_term_ref
-    );
-    if (!match) {
-      const available = termList.map(t => t.Name).join(', ');
-      throw new Error(`Term not found: "${sales_term_ref}". Available: ${available}`);
-    }
-    salesTermRef = { value: match.Id, name: match.Name };
+    salesTermRef = toQboRef(resolveTermRef(await getTermCache(client), sales_term_ref));
   }
 
   // Resolve lines
@@ -281,7 +273,7 @@ export async function handleGetInvoice(
     `Due Date: ${invoice.DueDate || '(none)'}`,
     `Ref no.: ${invoice.DocNumber || '(none)'}`,
     `Department: ${invoice.DepartmentRef?.name || invoice.DepartmentRef?.value || '(none)'}`,
-    `Terms: ${invoice.SalesTermRef?.name || '(none)'}`,
+    `Terms: ${await describeTermRef(client, invoice.SalesTermRef)}`,
     `Memo: ${invoice.PrivateNote || '(none)'}`,
     `Customer Memo: ${invoice.CustomerMemo?.value || '(none)'}`,
     `Bill Email: ${invoice.BillEmail?.Address || '(none)'}`,
@@ -414,19 +406,7 @@ export async function handleEditInvoice(
 
   // Resolve sales term if provided
   if (sales_term_ref !== undefined) {
-    const terms = await promisify<{ QueryResponse: { Term?: Array<{ Id: string; Name: string }> } }>((cb) =>
-      (client as unknown as Record<string, Function>).findTerms(cb)
-    );
-    const termList = terms.QueryResponse?.Term || [];
-    const match = termList.find(t =>
-      t.Name.toLowerCase() === sales_term_ref.toLowerCase() ||
-      t.Id === sales_term_ref
-    );
-    if (!match) {
-      const available = termList.map(t => t.Name).join(', ');
-      throw new Error(`Term not found: "${sales_term_ref}". Available: ${available}`);
-    }
-    updated.SalesTermRef = { value: match.Id, name: match.Name };
+    updated.SalesTermRef = toQboRef(resolveTermRef(await getTermCache(client), sales_term_ref));
   }
 
   // Resolve customer if provided
@@ -539,7 +519,7 @@ export async function handleEditInvoice(
     if (bill_email !== undefined) previewLines.push(`  Bill Email: ${current.BillEmail?.Address || '(none)'} → ${bill_email}`);
     if (sales_term_ref !== undefined) {
       const newTerm = (updated.SalesTermRef as { name?: string })?.name || sales_term_ref;
-      previewLines.push(`  Terms: ${current.SalesTermRef?.name || '(none)'} → ${newTerm}`);
+      previewLines.push(`  Terms: ${await describeTermRef(client, current.SalesTermRef)} → ${newTerm}`);
     }
     if (allow_online_credit_card_payment !== undefined) previewLines.push(`  Online CC Payment: ${current.AllowOnlineCreditCardPayment ?? '(not set)'} → ${allow_online_credit_card_payment}`);
     if (allow_online_ach_payment !== undefined) previewLines.push(`  Online ACH Payment: ${current.AllowOnlineACHPayment ?? '(not set)'} → ${allow_online_ach_payment}`);

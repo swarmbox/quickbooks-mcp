@@ -8,6 +8,10 @@
 
 import type { QBReport } from "../types/index.js";
 
+// Lives in utils/dates.ts so addDays validates with the same check; re-exported
+// because the report handlers and tests import it from here.
+export { isIsoDate } from "../utils/dates.js";
+
 // Start date for reports that QBO dates by a start_date/end_date pair but that
 // are point-in-time in meaning: the period must begin before any transaction so
 // end_date alone decides the date.
@@ -18,22 +22,6 @@ export const BEGINNING_OF_BOOKS = "1970-01-01";
 export interface AppliedAsOf {
   date?: string;
   macro?: string;
-}
-
-const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-// Strict calendar check: the shape alone would let 2026-02-30 through, and a
-// date that rolls over to March would be sent to QBO as a different day.
-export function isIsoDate(value: string): boolean {
-  const match = ISO_DATE.exec(value);
-  if (!match) return false;
-  const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])];
-  const parsed = new Date(Date.UTC(year, month - 1, day));
-  return (
-    parsed.getUTCFullYear() === year &&
-    parsed.getUTCMonth() === month - 1 &&
-    parsed.getUTCDate() === day
-  );
 }
 
 // Read the applied date from a report header. EndPeriod outranks the Option

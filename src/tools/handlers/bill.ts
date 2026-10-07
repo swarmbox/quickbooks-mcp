@@ -9,6 +9,8 @@ import {
   getClassCache,
   getDepartmentCache,
   getVendorCache,
+  getTermCache,
+  describeTermRef,
   resolveVendor,
   resolveAccountRef,
   resolveVendorRef,
@@ -16,9 +18,12 @@ import {
   resolveClassInput,
   resolveItemInput,
   resolveCustomerInput,
+  resolveTermRef,
+  termDueDays,
   toQboRef,
+  type TermRef,
 } from "../../client/index.js";
-import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount } from "../../utils/index.js";
+import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult, resolveItemLineAmount, addDays, isIsoDate } from "../../utils/index.js";
 
 // A bill's payee is its header VendorRef — by definition a vendor, so there is
 // no entity_type to pick. Line-level attribution is
@@ -55,6 +60,50 @@ interface BillLineChange {
   delete?: boolean;
 }
 
+interface PlannedDueDate {
+  date?: string;   // DueDate to send; undefined omits the key
+  note: string;    // preview annotation; "" when there is nothing to say
+}
+
+// The one due-date rule create_bill and edit_bill share, so the payload and the
+// preview can never disagree. An explicit date always wins and is sent as given;
+// terms only fill in a date the caller left out, computed here rather than left
+// for QBO to derive. A term with no fixed day count, or a txn_date that is not a
+// real date, cannot be computed from and is refused. The same two conditions
+// only skip the "terms would give a different date" hint when a date was given.
+function planDueDate(given: string | undefined, term: TermRef | undefined, txnDate: string): PlannedDueDate {
+  const days = term ? termDueDays(term) : undefined;
+
+  if (given !== undefined) {
+    if (!term || given === "" || days === undefined || !isIsoDate(txnDate)) {
+      return { date: given, note: "" };
+    }
+    const computed = addDays(txnDate, days);
+    return { date: given, note: computed === given ? "" : `(as given; ${term.name} gives ${computed})` };
+  }
+
+  if (!term) return { note: "" };
+  if (days === undefined) {
+    throw new Error(
+      `Terms "${term.name}" have no fixed number of days (Type ${term.type ?? "unknown"}), ` +
+      `so the due date cannot be computed from them — pass due_date.`
+    );
+  }
+  if (!isIsoDate(txnDate)) {
+    throw new Error(
+      `txn_date "${txnDate}" is not a valid YYYY-MM-DD date, so the due date cannot be ` +
+      `computed from terms "${term.name}" — fix txn_date or pass due_date.`
+    );
+  }
+  return {
+    date: addDays(txnDate, days),
+    note: `(${term.name}: ${days} ${days === 1 ? "day" : "days"} after ${txnDate})`,
+  };
+}
+
+// Append a planned annotation to a Due Date value, adding no space when empty.
+const withNote = (value: string, note: string): string => (note ? `${value} ${note}` : value);
+
 export async function handleCreateBill(
   client: QuickBooks,
   args: {
@@ -62,6 +111,7 @@ export async function handleCreateBill(
     vendor_id?: string;
     txn_date: string;
     due_date?: string;
+    sales_term_ref?: string;
     department_name?: string;
     department_id?: string;
     ap_account?: string;
@@ -72,7 +122,7 @@ export async function handleCreateBill(
   }
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   const {
-    vendor_name, vendor_id, txn_date, due_date,
+    vendor_name, vendor_id, txn_date, due_date, sales_term_ref,
     department_name, department_id, ap_account,
     memo, doc_number, lines, draft = true,
   } = args;
@@ -134,6 +184,11 @@ export async function handleCreateBill(
     });
     apAccountRef = { value: acct.value, name: acct.name };
   }
+
+  // Resolve terms before the lines, so a bad term fails before any item or
+  // customer lookup. An empty string means no terms, as on create_invoice.
+  const termRef = sales_term_ref ? resolveTermRef(await getTermCache(client), sales_term_ref) : undefined;
+  const due = planDueDate(due_date || undefined, termRef, txn_date);
 
   // Resolve lines. Item and customer resolution can hit the API, so this is a
   // loop. A line posts against an item or an account, never both.
@@ -217,7 +272,8 @@ export async function handleCreateBill(
   const billObject: Record<string, unknown> = {
     VendorRef: vendorRef,
     TxnDate: txn_date,
-    ...(due_date && { DueDate: due_date }),
+    ...(due.date && { DueDate: due.date }),
+    ...(termRef && { SalesTermRef: toQboRef(termRef) }),
     ...(memo && { PrivateNote: memo }),
     ...(doc_number && { DocNumber: doc_number }),
     ...(departmentRef && { DepartmentRef: departmentRef }),
@@ -283,7 +339,8 @@ export async function handleCreateBill(
       "",
       `Vendor: ${vendorRef.name}`,
       `Date: ${txn_date}`,
-      `Due Date: ${due_date || "(none)"}`,
+      `Due Date: ${withNote(due.date || "(none)", due.note)}`,
+      `Terms: ${termRef?.name || "(none)"}`,
       `Ref no.: ${doc_number || "(auto-assign)"}`,
       `Department: ${departmentRef?.name || "(none)"}`,
       `AP Account: ${apAccountRef?.name || "(default)"}`,
@@ -314,6 +371,8 @@ export async function handleCreateBill(
     `Vendor: ${vendorRef.name}`,
     `Ref no.: ${result.DocNumber || "(auto-assigned)"}`,
     `Date: ${txn_date}`,
+    `Due Date: ${due.date || "(none)"}`,
+    `Terms: ${termRef?.name || "(none)"}`,
     `Total: $${formatDollars(totalCents)}`,
     "",
     `View in QuickBooks: ${qboUrl}`,
@@ -337,6 +396,7 @@ export async function handleGetBill(
     SyncToken: string;
     TxnDate: string;
     DueDate?: string;
+    SalesTermRef?: { value: string; name?: string };
     DocNumber?: string;
     PrivateNote?: string;
     TotalAmt?: number;
@@ -374,6 +434,7 @@ export async function handleGetBill(
     `Vendor: ${bill.VendorRef?.name || bill.VendorRef?.value || '(none)'}`,
     `Date: ${bill.TxnDate}`,
     `Due Date: ${bill.DueDate || '(none)'}`,
+    `Terms: ${await describeTermRef(client, bill.SalesTermRef)}`,
     `Ref no.: ${bill.DocNumber || '(none)'}`,
     `Memo: ${bill.PrivateNote || '(none)'}`,
     `AP Account: ${bill.APAccountRef?.name || bill.APAccountRef?.value || 'Accounts Payable'}`,
@@ -416,6 +477,7 @@ export async function handleEditBill(
     vendor_name?: string;
     txn_date?: string;
     due_date?: string;
+    sales_term_ref?: string;
     memo?: string;
     department_name?: string;
     doc_number?: string;
@@ -423,7 +485,7 @@ export async function handleEditBill(
     draft?: boolean;
   }
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  const { id, vendor_name, txn_date, due_date, memo, department_name, doc_number, lines: lineChanges, draft = true } = args;
+  const { id, vendor_name, txn_date, due_date, sales_term_ref, memo, department_name, doc_number, lines: lineChanges, draft = true } = args;
 
   // Fetch current Bill
   const current = await promisify<unknown>((cb) =>
@@ -433,6 +495,7 @@ export async function handleEditBill(
     SyncToken: string;
     TxnDate: string;
     DueDate?: string;
+    SalesTermRef?: { value: string; name?: string };
     DocNumber?: string;
     PrivateNote?: string;
     DepartmentRef?: { value: string; name?: string };
@@ -489,7 +552,13 @@ export async function handleEditBill(
   }
 
   if (txn_date !== undefined) updated.TxnDate = txn_date;
-  if (due_date !== undefined) updated.DueDate = due_date;
+  // Edit resolves any provided value, so "" fails resolution rather than
+  // clearing terms, as on edit_invoice. The due date is computed from the date
+  // the bill will have after this edit.
+  const termRef = sales_term_ref !== undefined ? resolveTermRef(await getTermCache(client), sales_term_ref) : undefined;
+  const due = planDueDate(due_date, termRef, txn_date ?? current.TxnDate);
+  if (due.date !== undefined) updated.DueDate = due.date;
+  if (termRef) updated.SalesTermRef = toQboRef(termRef);
   if (memo !== undefined) updated.PrivateNote = memo;
   if (doc_number !== undefined) updated.DocNumber = doc_number;
 
@@ -724,10 +793,21 @@ export async function handleEditBill(
 
     if (vendor_name) previewLines.push(`  Vendor: ${current.VendorRef?.name || current.VendorRef?.value} → ${(vendorRef as { name?: string }).name || vendor_name}`);
     if (txn_date !== undefined) previewLines.push(`  Date: ${current.TxnDate} → ${txn_date}`);
-    if (due_date !== undefined) previewLines.push(`  Due Date: ${current.DueDate || '(none)'} → ${due_date}`);
+    if (due.date !== undefined) previewLines.push(`  Due Date: ${current.DueDate || '(none)'} → ${withNote(due.date, due.note)}`);
+    if (termRef) previewLines.push(`  Terms: ${await describeTermRef(client, current.SalesTermRef)} → ${termRef.name}`);
     if (memo !== undefined) previewLines.push(`  Memo: ${current.PrivateNote || '(none)'} → ${memo}`);
     if (doc_number !== undefined) previewLines.push(`  Ref no.: ${current.DocNumber || '(none)'} → ${doc_number}`);
     if (department_name !== undefined) previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${(updated.DepartmentRef as { name?: string })?.name || department_name}`);
+
+    // Changing txn_date alone leaves the due date as it is (a call without terms
+    // sends today's payload), so say so on a bill whose terms would move it.
+    if (txn_date !== undefined && due.date === undefined && current.SalesTermRef?.value) {
+      previewLines.push('');
+      previewLines.push(
+        `Note: this bill's terms are ${await describeTermRef(client, current.SalesTermRef)}, but its due date ` +
+        `(${current.DueDate || '(none)'}) is not part of this edit. Pass sales_term_ref with the same term to recompute it from the new date.`
+      );
+    }
 
     if (updated.Line) {
       previewLines.push('');

@@ -43,6 +43,7 @@ declare module "node-quickbooks" {
     // Generic finder methods - accept query strings or criteria objects
     findCustomers(criteria: object | string, callback: Callback<unknown>): void;
     findVendors(criteria: object | string, callback: Callback<unknown>): void;
+    findTerms(criteria: object | string, callback: Callback<unknown>): void;
     findAccounts(criteria: object | string, callback: Callback<unknown>): void;
     findInvoices(criteria: object | string, callback: Callback<unknown>): void;
     findBills(criteria: object | string, callback: Callback<unknown>): void;

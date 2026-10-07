@@ -51,7 +51,7 @@ function fakeClient(entity?: Record<string, unknown>) {
     findCustomers: (_c: unknown, cb: Callback<unknown>) => cb(null, list("Customer", CUSTOMERS)),
     findItems: (_c: unknown, cb: Callback<unknown>) => cb(null, list("Item", ITEMS)),
     findDepartments: (_c: unknown, cb: Callback<unknown>) => cb(null, list("Department", [])),
-    findTerms: (cb: Callback<unknown>) => cb(null, list("Term", [])),
+    findTerms: (_c: unknown, cb: Callback<unknown>) => cb(null, list("Term", [])),
     getInvoice: (_id: string, cb: Callback<unknown>) => cb(null, entity),
     createInvoice: (body: unknown, cb: Callback<unknown>) => {
       sent.created.push(body);
