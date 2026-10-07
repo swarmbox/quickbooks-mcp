@@ -3,7 +3,7 @@
 // get_report's enum is the catalog itself, so the advertised list and the
 // dispatch can never drift apart.
 import { REPORT_NAMES } from "../reports/catalog.js";
-import { LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
+import { CREATE_LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
 
 export const toolDefinitions = [
   {
@@ -1682,7 +1682,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_bill_payment",
-    description: "Create a bill payment (the QBO 'check' / 'pay bills' flow) that applies Accounts Payable transactions for one vendor. Apply bills, vendor credits, or any of JournalEntry, Deposit and Purchase via linked_txns. The side of each (charge it settles, or credit it offsets) is derived from the transaction itself, never declared by the caller; the payment total is charges minus credits. Amounts default to each transaction's open amount and may be set lower to apply it partially. A $0 application (credits fully offsetting charges) needs no payment_account. Use this to record vendor ACH/EFT debits or checks so the bank feed can match them. Defaults to draft: true for a preview; returns payment details and a link to view in QuickBooks once committed.",
+    description: "Create a bill payment (the QBO 'check' / 'pay bills' flow) that applies Accounts Payable transactions for one vendor. Apply bills, vendor credits, or a JournalEntry or Deposit via linked_txns. Purchase links are refused: QuickBooks drops them from a bill payment created through the API and books the rest. The side of each (charge it settles, or credit it offsets) is derived from the transaction itself, never declared by the caller; the payment total is charges minus credits. Amounts default to each transaction's open amount and may be set lower to apply it partially. A $0 application (credits fully offsetting charges) needs no payment_account. Use this to record vendor ACH/EFT debits or checks so the bank feed can match them. Defaults to draft: true for a preview; returns payment details and a link to view in QuickBooks once committed. If QuickBooks books a total or lines that differ from what was sent, the result is an error that states what was booked; nothing is undone.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1748,13 +1748,13 @@ export const toolDefinitions = [
         },
         linked_txns: {
           type: "array",
-          description: "Other Accounts Payable transactions to apply, by type. Its side comes from how it posts to A/P for the vendor: a JournalEntry whose A/P lines net to a debit is a credit, one that nets to a credit is a charge; a Deposit A/P line is a charge; a Purchase is a credit (a credit-card-credit Purchase is a charge). Bill and VendorCredit are also accepted here.",
+          description: "Other Accounts Payable transactions to apply, by type. Its side comes from how it posts to A/P for the vendor: a JournalEntry whose A/P lines net to a debit is a credit, one that nets to a credit is a charge; a Deposit A/P line is a charge. Bill and VendorCredit are also accepted here. Purchase is refused: QuickBooks drops a Purchase line from a bill payment created through the API.",
           items: {
             type: "object",
             properties: {
               txn_type: {
                 type: "string",
-                enum: [...LINKED_TXN_TYPES],
+                enum: [...CREATE_LINKED_TXN_TYPES],
                 description: "QBO transaction type to apply",
               },
               txn_id: {

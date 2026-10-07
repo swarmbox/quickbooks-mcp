@@ -9,7 +9,15 @@
 
 import QuickBooks from "node-quickbooks";
 import { formatAttachmentLines } from "./attachment.js";
-import { collectLinkRequests, resolveLinks, linkSides, LINK_KINDS, type ResolvedLink } from "./bill-payment-links.js";
+import {
+  collectLinkRequests,
+  resolveLinks,
+  linkSides,
+  linkKey,
+  LINK_KINDS,
+  type BillPaymentLine,
+  type ResolvedLink,
+} from "./bill-payment-links.js";
 import {
   promisify,
   promisifyWrite,
@@ -58,6 +66,102 @@ function excessCreditMessage(links: ResolvedLink[], chargeCents: number, creditC
     : `${opening} To bring it to $0, remove ${linkLabel(absorber)}.`;
 }
 
+/** The fields of QBO's created BillPayment that the check and its report read. */
+interface CreatedBillPayment {
+  Id: string;
+  DocNumber?: string;
+  TotalAmt?: number;
+  Line?: BillPaymentLine[];
+}
+
+/** One amount QBO booked: on a linked transaction, or `link` undefined for a line that links none. */
+interface BookedEntry {
+  link?: { type: string; id: string };
+  cents: number;
+}
+
+/**
+ * Every amount a created payment books, in response order. A line linking several
+ * transactions attributes its Amount to each, as get_bill_payment does, and a line
+ * with no LinkedTxn is one entry with no link.
+ */
+function bookedEntries(result: CreatedBillPayment): BookedEntry[] {
+  return (result.Line ?? []).flatMap((line): BookedEntry[] => {
+    const cents = toCents(line.Amount ?? 0);
+    const linked = line.LinkedTxn ?? [];
+    return linked.length === 0
+      ? [{ cents }]
+      : linked.map((txn) => ({ link: { type: txn.TxnType, id: txn.TxnId }, cents }));
+  });
+}
+
+/**
+ * How QBO's created payment differs from what was sent; empty when it matches.
+ *
+ * QuickBooks can accept a link with HTTP 200 and drop it (verified for Purchase), so
+ * a 200 is not proof the preview was booked. The create response carries the booked
+ * TotalAmt and Line[].LinkedTxn, so this compares them in cents with no further QBO
+ * call. Lines are keyed by TxnType and TxnId, so their order does not matter, and
+ * one link split across lines is summed. An absent TotalAmt reads as 0, as it does
+ * in get_bill_payment.
+ */
+function bookedDifferences(links: ResolvedLink[], totalCents: number, result: CreatedBillPayment): string[] {
+  const entries = bookedEntries(result);
+  const bookedByKey = new Map<string, number>();
+  for (const { link, cents } of entries) {
+    if (link) {
+      const key = linkKey(link.type, link.id);
+      bookedByKey.set(key, sumCents([bookedByKey.get(key) ?? 0, cents]));
+    }
+  }
+
+  const differences: string[] = [];
+  const bookedTotalCents = toCents(result.TotalAmt ?? 0);
+  if (bookedTotalCents !== totalCents) {
+    differences.push(`Total: sent $${formatDollars(totalCents)}, booked $${formatDollars(bookedTotalCents)}`);
+  }
+
+  const sentKeys = new Set<string>();
+  for (const l of links) {
+    const key = linkKey(l.type, l.id);
+    sentKeys.add(key);
+    const bookedCents = bookedByKey.get(key);
+    if (bookedCents === undefined) {
+      differences.push(`${l.type} ${l.id}: sent $${formatDollars(l.applyCents)}, not booked`);
+    } else if (bookedCents !== l.applyCents) {
+      differences.push(`${l.type} ${l.id}: sent $${formatDollars(l.applyCents)}, booked $${formatDollars(bookedCents)}`);
+    }
+  }
+
+  const reported = new Set<string>();
+  for (const { link, cents } of entries) {
+    if (!link) {
+      differences.push(`Line with no linked transaction: not sent, booked $${formatDollars(cents)}`);
+      continue;
+    }
+    const key = linkKey(link.type, link.id);
+    if (sentKeys.has(key) || reported.has(key)) continue;
+    reported.add(key);
+    differences.push(`${link.type} ${link.id}: not sent, booked $${formatDollars(bookedByKey.get(key)!)}`);
+  }
+  return differences;
+}
+
+/**
+ * What QBO booked, one entry per booked line per linked transaction. A credit is
+ * signed negative by the side of the matching sent link, as in get_bill_payment.
+ */
+function formatBookedLines(links: ResolvedLink[], result: CreatedBillPayment): string[] {
+  const sideByKey = new Map(links.map((l) => [linkKey(l.type, l.id), l.side]));
+  const entries = bookedEntries(result).map(({ link, cents }) => {
+    if (!link) return `  Line with no linked transaction: $${formatDollars(cents)}`;
+    const side = sideByKey.get(linkKey(link.type, link.id));
+    const label = side ?? "not sent";
+    return `  ${link.type} ${link.id}: ${side === "credit" ? "-" : ""}$${formatDollars(cents)} (${label})`;
+  });
+  return [...entries, `  Total: $${formatDollars(toCents(result.TotalAmt ?? 0))}`];
+}
+
 export async function handleCreateBillPayment(
   client: QuickBooks,
   args: {
@@ -72,7 +176,7 @@ export async function handleCreateBillPayment(
     linked_txns?: Array<{ txn_type: string; txn_id: string; amount?: number }>;
     draft?: boolean;
   }
-): Promise<{ content: Array<{ type: string; text: string }> }> {
+): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
   const { vendor_name, vendor_id, payment_account, txn_date, memo, doc_number, draft = true } = args;
 
   // Merge bills, credits and linked_txns in that order: the payload keeps
@@ -107,8 +211,8 @@ export async function handleCreateBillPayment(
 
   if (chargeCents === 0) {
     throw new Error(
-      "Nothing to pay: at least one charge-side transaction is required (a Bill, or a JournalEntry, " +
-      "Deposit or Purchase that credits Accounts Payable for the vendor)"
+      "Nothing to pay: at least one charge-side transaction is required (a Bill, or a JournalEntry " +
+      "or Deposit that credits Accounts Payable for the vendor)"
     );
   }
   if (totalCents < 0) {
@@ -172,17 +276,48 @@ export async function handleCreateBillPayment(
   // Create the bill payment
   const result = await promisifyWrite<unknown>((cb) =>
     client.createBillPayment(bpObject, cb)
-  ) as { Id: string; DocNumber?: string };
+  ) as CreatedBillPayment;
 
   const qboUrl = buildQboUrl("billpayment", "txnId", result.Id);
 
-  const response = [
-    "Bill Payment Created!",
-    "",
+  const paymentLines = [
     `Vendor: ${vendorRef.name}`,
     bankAccountLine,
     `Ref no.: ${result.DocNumber || "(auto-assigned)"}`,
     `Date: ${txn_date}`,
+  ];
+
+  // Returned, not thrown: the payment exists, so the caller must be told what was
+  // booked rather than see a failure and retry. Nothing is undone here.
+  const differences = bookedDifferences(links, totalCents, result);
+  if (differences.length > 0) {
+    const mismatch = [
+      "Bill Payment Created — NOT AS PREVIEWED",
+      "",
+      `QuickBooks created bill payment ${result.Id} but booked it differently from what was sent:`,
+      ...differences.map((d) => `  ${d}`),
+      "",
+      "Booked by QuickBooks:",
+      ...formatBookedLines(links, result),
+      "",
+      ...paymentLines,
+      "",
+      "Nothing was undone. Review this payment in QuickBooks; if it is not wanted, delete it with " +
+        `delete_entity (entity_type "bill_payment", id "${result.Id}").`,
+      "Do not re-run create_bill_payment for this payment: a repeat would book a second one.",
+      `View in QuickBooks: ${qboUrl}`,
+    ].join("\n");
+
+    return {
+      content: [{ type: "text", text: mismatch }],
+      isError: true,
+    };
+  }
+
+  const response = [
+    "Bill Payment Created!",
+    "",
+    ...paymentLines,
     "",
     ...appliedSection,
     "",
@@ -213,10 +348,7 @@ export async function handleGetBillPayment(
     VendorRef?: { value: string; name?: string };
     CheckPayment?: { BankAccountRef?: { value: string; name?: string } };
     CreditCardPayment?: { CCAccountRef?: { value: string; name?: string } };
-    Line?: Array<{
-      Amount: number;
-      LinkedTxn?: Array<{ TxnId: string; TxnType: string }>;
-    }>;
+    Line?: BillPaymentLine[];
   };
   const qboUrl = buildQboUrl("billpayment", "txnId", bp.Id);
 
@@ -229,7 +361,7 @@ export async function handleGetBillPayment(
   // of bills that stay open after a payment was matched.
   const sides = await linkSides(client, bp.VendorRef?.value ?? "", bp.Line || []);
   const linked = (bp.Line || []).flatMap((l) =>
-    (l.LinkedTxn || []).map((txn) => ({ txn, cents: toCents(l.Amount), side: sides.get(`${txn.TxnType}:${txn.TxnId}`) }))
+    (l.LinkedTxn || []).map((txn) => ({ txn, cents: toCents(l.Amount ?? 0), side: sides.get(linkKey(txn.TxnType, txn.TxnId)) }))
   );
   const unknownCount = linked.filter((l) => l.side === undefined).length;
   const appliedCents = sumCents(linked.map((l) => (l.side === "credit" ? -l.cents : l.cents)));

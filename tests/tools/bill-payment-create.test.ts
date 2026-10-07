@@ -14,12 +14,19 @@ type Request = Omit<CreateArgs, "txn_date"> & { txn_date?: string };
 
 const CHECKING_REF = { value: "10", name: "1010 Checking" };
 
-async function create(fake: FakeClient, args: Request): Promise<string> {
-  const result = await handleCreateBillPayment(fake.client, {
+// Typed locally so the tests state the isError contract the handler's result must meet.
+type CreateResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+async function createResult(fake: FakeClient, args: Request): Promise<CreateResult> {
+  return handleCreateBillPayment(fake.client, {
     vendor_name: "North Produce",
     txn_date: "2026-07-15",
     ...args,
   });
+}
+
+async function create(fake: FakeClient, args: Request): Promise<string> {
+  const result = await createResult(fake, args);
   return result.content.map((c) => c.text).join("\n");
 }
 
@@ -37,11 +44,11 @@ function linesOf(payload: Record<string, unknown>): Array<[number, string, strin
   );
 }
 
-/** The indented lines under "Applied:", up to the first blank line. */
-function appliedBlock(text: string): string[] {
+/** The trimmed lines under a header line, up to the first blank line. */
+function blockAfter(text: string, header: string): string[] {
   const lines = text.split("\n");
-  const start = lines.indexOf("Applied:");
-  assert.ok(start >= 0, `expected an "Applied:" block in:\n${text}`);
+  const start = lines.indexOf(header);
+  assert.ok(start >= 0, `expected "${header}" in:\n${text}`);
   const block: string[] = [];
   for (const line of lines.slice(start + 1)) {
     if (line.trim() === "") break;
@@ -49,6 +56,8 @@ function appliedBlock(text: string): string[] {
   }
   return block;
 }
+
+const appliedBlock = (text: string): string[] => blockAfter(text, "Applied:");
 
 const DRAFT_PREVIEW_ARGS: Request = {
   payment_account: "1010",
@@ -92,21 +101,21 @@ describe("create_bill_payment — payload", () => {
       bills: [{ bill_id: "101" }],
       linked_txns: [
         { txn_type: "Deposit", txn_id: "500" },
-        { txn_type: "Purchase", txn_id: "701" },
+        { txn_type: "JournalEntry", txn_id: "301", amount: 100 },
         { txn_type: "JournalEntry", txn_id: "300", amount: 100 },
-        { txn_type: "Purchase", txn_id: "700" },
+        { txn_type: "VendorCredit", txn_id: "402" },
       ],
       draft: false,
     });
     const payload = onlySent(fake);
-    // 250 + 60 + 30 charges − (100 + 80) credits.
-    assert.equal(payload.TotalAmt, 160);
+    // 250 + 60 + 100 charges − (100 + 40) credits.
+    assert.equal(payload.TotalAmt, 270);
     assert.deepEqual(linesOf(payload), [
       [250, "Bill", "101"],
       [60, "Deposit", "500"],
-      [30, "Purchase", "701"],
+      [100, "JournalEntry", "301"],
       [100, "JournalEntry", "300"],
-      [80, "Purchase", "700"],
+      [40, "VendorCredit", "402"],
     ]);
     for (const [amount] of linesOf(payload)) assert.ok(amount > 0, "every line Amount is positive");
   });
@@ -118,9 +127,9 @@ describe("create_bill_payment — payload", () => {
       bills: [{ bill_id: "101" }],
       linked_txns: [
         { txn_type: "Deposit", txn_id: "500" },
-        { txn_type: "Purchase", txn_id: "701" },
+        { txn_type: "JournalEntry", txn_id: "301", amount: 100 },
         { txn_type: "JournalEntry", txn_id: "300", amount: 100 },
-        { txn_type: "Purchase", txn_id: "700" },
+        { txn_type: "VendorCredit", txn_id: "402" },
       ],
     });
     assert.equal(fake.callsTo("createBillPayment"), 0);
@@ -207,12 +216,32 @@ describe("create_bill_payment — credits that exceed charges are rejected, neve
         payment_account: "1010",
         bills: [{ bill_id: "103", amount: 10 }],
         credits: [{ vendor_credit_id: "401" }],
-        linked_txns: [{ txn_type: "Purchase", txn_id: "700" }],
+        linked_txns: [{ txn_type: "JournalEntry", txn_id: "300", amount: 80 }],
         draft: false,
       }),
     );
     assert.ok(message.includes("Reduce the credit amounts by $120.00 in total"), message);
     assert.equal(fake.callsTo("createBillPayment"), 0);
+  });
+});
+
+describe("create_bill_payment — Purchase links are refused", () => {
+  const args: Request = {
+    payment_account: "1010",
+    bills: [{ bill_id: "101" }],
+    linked_txns: [{ txn_type: "Purchase", txn_id: "700" }],
+  };
+
+  it("create-purchase-refused-before-any-call — draft and commit both reject with no QuickBooks call", async () => {
+    const draftFake = fakeClient();
+    const draftMessage = await rejectionOf(() => create(draftFake, args));
+    assert.ok(draftMessage.startsWith("Purchase 700 cannot be applied by create_bill_payment:"), draftMessage);
+    assert.deepEqual(draftFake.calls, []);
+
+    const commitFake = fakeClient();
+    const commitMessage = await rejectionOf(() => create(commitFake, { ...args, draft: false }));
+    assert.ok(commitMessage.startsWith("Purchase 700 cannot be applied by create_bill_payment:"), commitMessage);
+    assert.deepEqual(commitFake.calls, []);
   });
 });
 
@@ -277,5 +306,190 @@ describe("create_bill_payment — preview and result text", () => {
     clearLookupCache();
     const created = await create(fakeClient(), { ...DRAFT_PREVIEW_ARGS, draft: false });
     assert.deepEqual(appliedBlock(created), appliedBlock(draft));
+  });
+});
+
+describe("create_bill_payment — the created payment is checked against what was sent", () => {
+  const MISMATCH_HEADER = "QuickBooks created bill payment 950 but booked it differently from what was sent:";
+
+  const line = (amount: number, type: string, id: string): Record<string, unknown> => ({
+    Amount: amount,
+    LinkedTxn: [{ TxnId: id, TxnType: type }],
+  });
+
+  /** A fake whose createBillPayment books `totalAmt` and `lines` in place of what was sent. */
+  const booking = (totalAmt: number, lines: Array<Record<string, unknown>>): FakeClient =>
+    fakeClient({
+      createBillPayment: (payload) => ({ ...payload, Id: "950", SyncToken: "0", TotalAmt: totalAmt, Line: lines }),
+    });
+
+  /** createBillPayment is the last call QuickBooks received: nothing re-read, deleted or voided. */
+  function assertNothingAfterCreate(fake: FakeClient): void {
+    assert.equal(fake.callsTo("createBillPayment"), 1);
+    assert.equal(fake.calls[fake.calls.length - 1], "createBillPayment");
+  }
+
+  function assertMismatch(result: CreateResult): string {
+    const text = result.content.map((c) => c.text).join("\n");
+    assert.equal(result.isError, true, text);
+    assert.equal(text.split("\n")[0], "Bill Payment Created — NOT AS PREVIEWED");
+    assert.ok(!text.includes("Bill Payment Created!"), text);
+    return text;
+  }
+
+  const BILL_AND_CREDIT: Request = {
+    payment_account: "1010",
+    bills: [{ bill_id: "101" }],
+    credits: [{ vendor_credit_id: "401" }],
+    draft: false,
+  };
+
+  it("create-mismatch-dropped-line-reported — a dropped JournalEntry line is an error naming the total, the line and what was booked", async () => {
+    const fake = booking(250, [line(250, "Bill", "101")]);
+    const result = await createResult(fake, {
+      payment_account: "1010",
+      bills: [{ bill_id: "101" }],
+      linked_txns: [{ txn_type: "JournalEntry", txn_id: "300", amount: 250 }],
+      draft: false,
+    });
+    const text = assertMismatch(result);
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), [
+      "Total: sent $0.00, booked $250.00",
+      "JournalEntry 300: sent $250.00, not booked",
+    ]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), ["Bill 101: $250.00 (charge)", "Total: $250.00"]);
+    assert.ok(text.includes("Nothing was undone."), text);
+    assert.ok(text.includes('delete_entity (entity_type "bill_payment", id "950")'), text);
+    assert.ok(text.includes("Do not re-run create_bill_payment for this payment"), text);
+    assert.ok(text.split("\n").at(-1)?.startsWith("View in QuickBooks: "), text);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-mismatch-amount-changed — a changed line amount is reported per line, credits signed negative", async () => {
+    const fake = booking(200, [line(240, "Bill", "101"), line(40, "VendorCredit", "401")]);
+    const text = assertMismatch(await createResult(fake, BILL_AND_CREDIT));
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), [
+      "Bill 101: sent $250.00, booked $240.00",
+      "VendorCredit 401: sent $50.00, booked $40.00",
+    ]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), [
+      "Bill 101: $240.00 (charge)",
+      "VendorCredit 401: -$40.00 (credit)",
+      "Total: $200.00",
+    ]);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-mismatch-extra-link — a booked link that was not sent is reported as not sent", async () => {
+    const fake = booking(260, [line(250, "Bill", "101"), line(10, "Bill", "103")]);
+    const text = assertMismatch(
+      await createResult(fake, { payment_account: "1010", bills: [{ bill_id: "101" }], draft: false }),
+    );
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), [
+      "Total: sent $250.00, booked $260.00",
+      "Bill 103: not sent, booked $10.00",
+    ]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), [
+      "Bill 101: $250.00 (charge)",
+      "Bill 103: $10.00 (not sent)",
+      "Total: $260.00",
+    ]);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-mismatch-unlinked-line — a booked line with no linked transaction is reported", async () => {
+    const fake = booking(255, [line(250, "Bill", "101"), { Amount: 5 }]);
+    const text = assertMismatch(
+      await createResult(fake, { payment_account: "1010", bills: [{ bill_id: "101" }], draft: false }),
+    );
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), [
+      "Total: sent $250.00, booked $255.00",
+      "Line with no linked transaction: not sent, booked $5.00",
+    ]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), [
+      "Bill 101: $250.00 (charge)",
+      "Line with no linked transaction: $5.00",
+      "Total: $255.00",
+    ]);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-mismatch-absent-total-nonzero — a response with no TotalAmt reads as $0.00 and is flagged on a non-zero payment", async () => {
+    const fake = fakeClient({
+      createBillPayment: (payload) => {
+        const booked: Record<string, unknown> = { ...payload, Id: "950", SyncToken: "0" };
+        delete booked.TotalAmt;
+        return booked;
+      },
+    });
+    const text = assertMismatch(
+      await createResult(fake, { payment_account: "1010", bills: [{ bill_id: "101" }], draft: false }),
+    );
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), ["Total: sent $250.00, booked $0.00"]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), ["Bill 101: $250.00 (charge)", "Total: $0.00"]);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-mismatch-multi-link-line — a line linking several transactions attributes its amount to each", async () => {
+    const fake = booking(200, [
+      {
+        Amount: 250,
+        LinkedTxn: [
+          { TxnId: "101", TxnType: "Bill" },
+          { TxnId: "401", TxnType: "VendorCredit" },
+        ],
+      },
+    ]);
+    const text = assertMismatch(await createResult(fake, BILL_AND_CREDIT));
+    assert.deepEqual(blockAfter(text, MISMATCH_HEADER), ["VendorCredit 401: sent $50.00, booked $250.00"]);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), [
+      "Bill 101: $250.00 (charge)",
+      "VendorCredit 401: -$250.00 (credit)",
+      "Total: $200.00",
+    ]);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-match-ignores-line-order — the same lines in another order are not flagged", async () => {
+    const fake = fakeClient({
+      createBillPayment: (payload) => ({
+        ...payload,
+        Id: "950",
+        SyncToken: "0",
+        Line: [...(payload.Line as unknown[])].reverse(),
+      }),
+    });
+    const result = await createResult(fake, BILL_AND_CREDIT);
+    const text = result.content.map((c) => c.text).join("\n");
+    assert.equal(result.isError, undefined, text);
+    assert.ok(text.startsWith("Bill Payment Created!"), text);
+    assert.ok(!text.includes("NOT AS PREVIEWED"), text);
+    assertNothingAfterCreate(fake);
+  });
+
+  it("create-match-absent-total-zero — a response with no TotalAmt matches a $0.00 payment", async () => {
+    const fake = fakeClient({
+      createBillPayment: (payload) => {
+        const booked: Record<string, unknown> = { ...payload, Id: "950", SyncToken: "0" };
+        delete booked.TotalAmt;
+        return booked;
+      },
+    });
+    const result = await createResult(fake, {
+      bills: [{ bill_id: "101" }],
+      linked_txns: [{ txn_type: "JournalEntry", txn_id: "300", amount: 250 }],
+      draft: false,
+    });
+    const text = result.content.map((c) => c.text).join("\n");
+    assert.equal(result.isError, undefined, text);
+    assert.ok(text.startsWith("Bill Payment Created!"), text);
+  });
+
+  it("create-match-sums-split-line — one link split across two lines that sum to the sent amount is not flagged", async () => {
+    const fake = booking(250, [line(200, "Bill", "101"), line(50, "Bill", "101")]);
+    const result = await createResult(fake, { payment_account: "1010", bills: [{ bill_id: "101" }], draft: false });
+    const text = result.content.map((c) => c.text).join("\n");
+    assert.equal(result.isError, undefined, text);
+    assert.ok(text.startsWith("Bill Payment Created!"), text);
   });
 });

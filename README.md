@@ -334,7 +334,7 @@ QBO_INLINE_OUTPUT=true
 | `get_vendor_credit` | Fetch a vendor credit by ID |
 | `edit_vendor_credit` | Modify an existing vendor credit |
 | **Bill Payments** | |
-| `create_bill_payment` | Pay bills and apply vendor credits, journal entries, deposits or purchases via `linked_txns` (the QBO "check" / pay-bills flow); each side is derived from the transaction, amounts default to the open amount and may be partial, and a $0 application needs no `payment_account` |
+| `create_bill_payment` | Pay bills and apply vendor credits, journal entries or deposits via `linked_txns` (the QBO "check" / pay-bills flow); each side is derived from the transaction, amounts default to the open amount and may be partial, and a $0 application needs no `payment_account`. Purchase links are refused (QuickBooks drops them), and a payment QuickBooks books differently from the preview is reported as an error |
 | `receive_payment` | Record a customer payment against open invoices (A/R counterpart to `create_bill_payment`); each line defaults to the invoice's open balance |
 | `create_transfer` | Move money between two of the company's own accounts (bank↔bank, credit-card paydown) |
 | `get_bill_payment` | Fetch a bill payment by ID; signs each linked transaction by side (credit/charge) and flags unapplied amounts |

@@ -593,8 +593,8 @@ returns it bare: ten `*Prefs` sections plus `Id`, `SyncToken` and `MetaData`.
 
 A `BillPayment` line carries one `LinkedTxn` (`TxnId`, `TxnType`) and a positive
 `Amount`. The line type is not limited to bills: `create_bill_payment` accepts
-`Bill`, `VendorCredit`, `JournalEntry`, `Deposit` and `Purchase`, and
-`get_bill_payment` signs every line with the same rules. The header `TotalAmt` is
+`Bill`, `VendorCredit`, `JournalEntry` and `Deposit`, and `get_bill_payment`
+signs those and `Purchase` with the same rules. The header `TotalAmt` is
 charge-side lines minus credit-side lines, so it is never the sum of the
 `Amount`s once a credit is applied.
 
@@ -608,7 +608,7 @@ negative debits A/P):
 | `VendorCredit` | credit | `Balance`, else `TotalAmt` |
 | `JournalEntry` | A/P lines for the vendor net to a Credit: charge. Net to a Debit: credit | \|net\| minus amount already applied |
 | `Deposit` | an A/P line naming the vendor (e.g. a vendor refund): charge | \|sum\| minus amount already applied |
-| `Purchase` | A/P expense line: credit. `Credit: true` (credit-card credit): charge | \|sum\| minus amount already applied |
+| `Purchase` (reads only) | A/P expense line: credit. `Credit: true` (credit-card credit): charge | \|sum\| minus amount already applied |
 
 ### $0 payment shape
 
@@ -625,8 +625,9 @@ and `Purchase` carry none, and only a JournalEntry lists its applying
 bill payments. So the tool queries the vendor's bill payments
 (`select * from BillPayment where VendorRef = '<id>'`), sums each line's
 `Amount` per `(TxnType, TxnId)`, and subtracts that from the transaction's A/P
-magnitude for the vendor. The query runs only when one of those three types is
-requested. A scan that hits the safety limit is an error, never a partial total.
+magnitude for the vendor. On create the query runs only when a `JournalEntry` or
+`Deposit` is requested, because `Purchase` is refused before any read. A scan
+that hits the safety limit is an error, never a partial total.
 
 ### Documented
 
@@ -651,18 +652,44 @@ So these are accepted on create:
 - A $0 `BillPayment` with `CheckPayment: { PrintStatus: "NotSet" }` and no
   `BankAccountRef`.
 
+### Verified: Purchase links are not applied through the API
+
+Checked in a sandbox company (2026-10-07) with a bill and an equal `Purchase`
+holding an Accounts Payable expense line for the same vendor, both linked from
+one `BillPayment`:
+
+- With `CheckPayment.BankAccountRef`: HTTP 200, with a response `TotalAmt` equal
+  to the bill and one line linking the bill. The `Purchase` line is dropped, the
+  bill's balance goes to 0 and the `Purchase` is untouched, so a real payment of
+  the bill amount is booked.
+- Without `BankAccountRef`: rejected with ValidationFault 6000.
+- `TxnType` `Check` or `Expense`: the same result, for `Purchase`s of every
+  `PaymentType`.
+- Linking from the `Purchase` side (header or line `LinkedTxn`, on create or
+  sparse update): accepted and ignored.
+
+`create_bill_payment` therefore refuses `Purchase` before any read or write.
+`get_bill_payment` still classifies the `Purchase` lines that UI-created payments
+carry.
+
 ### Unverified
 
 Not yet proven through the API:
 
-- Acceptance of `Deposit` and `Purchase` links on a `BillPayment` created
-  through the API. `Purchase` is the least likely, since it appears only in
-  UI-created data.
+- Acceptance of `Deposit` links on a `BillPayment` created through the API. A
+  dropped `Deposit` line would be caught by create's response check.
 - Whether a JournalEntry with several A/P lines for the vendor is one netted link
   keyed by `(TxnType, TxnId)` rather than one link per line (`TxnLineId`).
 
-If QBO rejects a type, drop it from `LINKED_TXN_TYPES`; until then QBO's own error
-reaches the caller through `formatQboError`.
+### When QBO accepts a link but does not apply it
+
+QBO can return 200 and drop a link, as it does for `Purchase`. After every create,
+`create_bill_payment` compares the response's `TotalAmt` and each line's
+`(TxnType, TxnId, Amount)` with what it sent, and reports any difference as an
+error naming the payment and what was booked. It never deletes the payment.
+
+A type shown not to apply gets a `createRefusal` in `LINK_KINDS` and stays in
+`LINKED_TXN_TYPES`, because reads still classify it.
 
 ## References
 

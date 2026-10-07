@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   LINKED_TXN_TYPES,
+  CREATE_LINKED_TXN_TYPES,
   LINK_KINDS,
   collectLinkRequests,
   appliedByLinkedTxn,
@@ -57,21 +58,43 @@ describe("bill-payment links — collectLinkRequests", () => {
     assert.equal(requests[2].amountCents, 10000);
   });
 
-  it("links-unknown-type-rejected — names the type and every supported one", async () => {
+  it("links-unknown-type-lists-create-types — names the type and every create-accepted one", async () => {
     const message = await rejectionOf(() =>
       collectLinkRequests({ linked_txns: [{ txn_type: "Invoice", txn_id: "9" }] }),
     );
     assert.equal(
       message,
-      'Unsupported txn_type "Invoice". Supported: Bill, VendorCredit, JournalEntry, Deposit, Purchase',
+      'Unsupported txn_type "Invoice". Supported: Bill, VendorCredit, JournalEntry, Deposit',
     );
   });
 
-  it("links-unknown-type-rejected — the supported list comes from LINKED_TXN_TYPES", async () => {
+  it("links-unknown-type-lists-create-types — the supported list comes from CREATE_LINKED_TXN_TYPES", async () => {
     const message = await rejectionOf(() =>
       collectLinkRequests({ linked_txns: [{ txn_type: "Invoice", txn_id: "9" }] }),
     );
-    assert.ok(message.endsWith(`Supported: ${LINKED_TXN_TYPES.join(", ")}`), message);
+    assert.ok(message.endsWith(`Supported: ${CREATE_LINKED_TXN_TYPES.join(", ")}`), message);
+  });
+
+  it("links-create-types-exclude-purchase — create accepts four types, reads still classify five", () => {
+    assert.deepEqual([...CREATE_LINKED_TXN_TYPES], ["Bill", "VendorCredit", "JournalEntry", "Deposit"]);
+    assert.deepEqual([...LINKED_TXN_TYPES], ["Bill", "VendorCredit", "JournalEntry", "Deposit", "Purchase"]);
+    const refusal = LINK_KINDS.Purchase.createRefusal;
+    assert.ok(typeof refusal === "string" && refusal.length > 0, "Purchase must carry a createRefusal");
+    for (const type of LINKED_TXN_TYPES.filter((t) => t !== "Purchase")) {
+      assert.equal(LINK_KINDS[type].createRefusal, undefined, `${type} must not carry a createRefusal`);
+    }
+  });
+
+  it("links-purchase-refused-on-create — Purchase is refused whatever else the request holds", async () => {
+    const expected = `Purchase 700 cannot be applied by create_bill_payment: ${LINK_KINDS.Purchase.createRefusal}`;
+    const purchase = { txn_type: "Purchase", txn_id: "700" };
+    for (const args of [
+      { linked_txns: [purchase] },
+      { linked_txns: [{ ...purchase, txn_type: "purchase" }] },
+      { bills: [{ bill_id: "101" }], linked_txns: [purchase] },
+    ]) {
+      assert.equal(await rejectionOf(() => collectLinkRequests(args)), expected);
+    }
   });
 
   it("links-type-case-insensitive — normalises txn_type to its canonical spelling", async () => {

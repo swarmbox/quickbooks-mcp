@@ -215,6 +215,8 @@ type Records = Record<string, Record<string, unknown>>;
 export interface FakeClientOptions {
   /** Replaces the default findBillPayments page: returns the BillPayment rows for one page. */
   findBillPayments?: (criteria: string) => Array<Record<string, unknown>>;
+  /** Replaces the default createBillPayment echo: returns the BillPayment QBO would book for the payload. */
+  createBillPayment?: (payload: Record<string, unknown>) => Record<string, unknown>;
   /** Extra or replacement records, keyed by entity then id. */
   records?: Partial<Record<"Bill" | "VendorCredit" | "JournalEntry" | "Deposit" | "Purchase" | "BillPayment", Records>>;
   /** Delay every get* read so concurrency can be observed. */
@@ -310,7 +312,7 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
     createBillPayment: (payload: Record<string, unknown>, cb: Callback<unknown>) => {
       calls.push("createBillPayment");
       sent.push(payload);
-      cb(null, { ...structuredClone(payload), Id: "950", SyncToken: "0" });
+      cb(null, options.createBillPayment?.(payload) ?? { ...structuredClone(payload), Id: "950", SyncToken: "0" });
     },
     findAttachables: (_criteria: unknown, cb: Callback<unknown>) => {
       calls.push("findAttachables");

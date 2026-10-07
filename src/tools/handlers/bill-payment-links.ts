@@ -2,7 +2,8 @@
 //
 // A BillPayment line links one A/P transaction: a Bill or VendorCredit, and
 // also a JournalEntry, Deposit or Purchase that posts to Accounts Payable for
-// the vendor. Each linked transaction sits on one of two sides:
+// the vendor. Reads classify all five; create_bill_payment refuses Purchase,
+// which QBO drops when a bill payment is created through the API. Each linked transaction sits on one of two sides:
 //
 //   charge — it credits A/P (the vendor is owed); the payment settles it.
 //   credit — it debits A/P (the vendor owes back); the payment applies it.
@@ -22,7 +23,11 @@ import { promisify, getAccountCache } from "../../client/index.js";
 import { fetcherForEntity, paginatedQuery, SAFETY_LIMIT } from "../../query/pagination.js";
 import { mapWithConcurrency, validateAmount, toCents, sumCents, formatDollars } from "../../utils/index.js";
 
-/** The single source of the transaction types a bill payment line can link. */
+/**
+ * The single source of the transaction types a bill payment line can link.
+ * Purchase is classified on reads (UI-created payments carry it) but refused on
+ * create; see `CREATE_LINKED_TXN_TYPES`.
+ */
 export const LINKED_TXN_TYPES = ["Bill", "VendorCredit", "JournalEntry", "Deposit", "Purchase"] as const;
 export type LinkedTxnType = (typeof LINKED_TXN_TYPES)[number];
 export type ApSide = "charge" | "credit";
@@ -92,6 +97,8 @@ interface LinkKind {
   tracked?: { side: ApSide; openCents(txn: LinkedTxnRecord): number };
   /** The rest: signed cents this txn posts to A/P for the vendor (positive credits A/P). */
   apCents?(txn: LinkedTxnRecord, vendorId: string, apAccountIds: Set<string>): number;
+  /** Why create_bill_payment refuses this type. Reads still classify it. */
+  createRefusal?: string;
 }
 
 type LinkGetter = "getBill" | "getVendorCredit" | "getJournalEntry" | "getDeposit" | "getPurchase";
@@ -160,10 +167,24 @@ export const LINK_KINDS: Record<LinkedTxnType, LinkKind> = {
       ));
       return txn.Credit === true ? debited : -debited;
     },
+    createRefusal:
+      "QuickBooks drops a Purchase line from a bill payment created through the API and books the " +
+      "other lines, so the payment would not match its preview. Apply it in QuickBooks instead.",
   },
 };
 
-const linkKey = (type: LinkedTxnType, id: string) => `${type}:${id}`;
+/** The types create_bill_payment accepts: every linkable type without a `createRefusal`. */
+export const CREATE_LINKED_TXN_TYPES: readonly LinkedTxnType[] =
+  LINKED_TXN_TYPES.filter((t) => !LINK_KINDS[t].createRefusal);
+
+/** One line of a stored or created BillPayment: an amount applied to the transactions it links. */
+export interface BillPaymentLine {
+  Amount?: number;
+  LinkedTxn?: Array<{ TxnId: string; TxnType: string }>;
+}
+
+/** The key for a linked transaction, `${TxnType}:${TxnId}`, shared by every map over bill payment lines. */
+export const linkKey = (type: string, id: string) => `${type}:${id}`;
 
 function nameOf(type: LinkedTxnType, txn: LinkedTxnRecord): string {
   return `${LINK_KINDS[type].label} ${txn.Id} (#${txn.DocNumber || "?"})`;
@@ -172,14 +193,14 @@ function nameOf(type: LinkedTxnType, txn: LinkedTxnRecord): string {
 function canonicalType(txnType: string): LinkedTxnType {
   const type = LINKED_TXN_TYPES.find((t) => t.toLowerCase() === String(txnType).toLowerCase());
   if (!type) {
-    throw new Error(`Unsupported txn_type "${txnType}". Supported: ${LINKED_TXN_TYPES.join(", ")}`);
+    throw new Error(`Unsupported txn_type "${txnType}". Supported: ${CREATE_LINKED_TXN_TYPES.join(", ")}`);
   }
   return type;
 }
 
 /**
  * Merge bills[], credits[] and linked_txns[] into one request list, in that
- * order. Rejects unknown types, duplicates, an empty list and non-positive or
+ * order. Rejects unknown types, types create refuses, duplicates, an empty list and non-positive or
  * over-precise amounts. A request never carries a side.
  */
 export function collectLinkRequests(args: {
@@ -198,7 +219,9 @@ export function collectLinkRequests(args: {
 
   const seen = new Set<string>();
   return entries.map(({ type, id, amount }) => {
-    const name = `${LINK_KINDS[type].label} ${id}`;
+    const { label, createRefusal } = LINK_KINDS[type];
+    const name = `${label} ${id}`;
+    if (createRefusal) throw new Error(`${name} cannot be applied by create_bill_payment: ${createRefusal}`);
     const key = linkKey(type, id);
     if (seen.has(key)) throw new Error(`${name} is listed more than once`);
     seen.add(key);
@@ -265,11 +288,11 @@ export async function appliedByLinkedTxn(
   }
 
   const applied = new Map<string, number>();
-  for (const bp of result.entities as Array<{ Line?: Array<{ Amount?: number; LinkedTxn?: Array<{ TxnId: string; TxnType: string }> }> }>) {
+  for (const bp of result.entities as Array<{ Line?: BillPaymentLine[] }>) {
     for (const line of bp.Line ?? []) {
       const cents = toCents(line.Amount ?? 0);
       for (const txn of line.LinkedTxn ?? []) {
-        const key = `${txn.TxnType}:${txn.TxnId}`;
+        const key = linkKey(txn.TxnType, txn.TxnId);
         applied.set(key, sumCents([applied.get(key) ?? 0, cents]));
       }
     }
@@ -343,14 +366,14 @@ const isLinkedTxnType = (type: string): type is LinkedTxnType =>
 export async function linkSides(
   client: QuickBooks,
   vendorId: string,
-  lines: Array<{ LinkedTxn?: Array<{ TxnId: string; TxnType: string }> }>,
+  lines: BillPaymentLine[],
 ): Promise<Map<string, ApSide | undefined>> {
   const sides = new Map<string, ApSide | undefined>();
   const derived: Array<{ type: LinkedTxnType; id: string }> = [];
 
   for (const line of lines) {
     for (const { TxnType, TxnId } of line.LinkedTxn ?? []) {
-      const key = `${TxnType}:${TxnId}`;
+      const key = linkKey(TxnType, TxnId);
       if (sides.has(key)) continue;
       sides.set(key, undefined);
       if (!isLinkedTxnType(TxnType)) continue;
