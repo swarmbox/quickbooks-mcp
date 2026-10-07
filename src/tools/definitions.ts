@@ -3,6 +3,7 @@
 // get_report's enum is the catalog itself, so the advertised list and the
 // dispatch can never drift apart.
 import { REPORT_NAMES } from "../reports/catalog.js";
+import { LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
 
 export const toolDefinitions = [
   {
@@ -1673,13 +1674,13 @@ export const toolDefinitions = [
   },
   {
     name: "create_bill_payment",
-    description: "Create a bill payment (the QBO 'check' / 'pay bills' flow). Pays one or more existing bills and optionally applies vendor credits, clearing Accounts Payable. Use this to record vendor ACH/EFT debits or checks so the bank feed can match them — especially when a bank charge equals bills minus credit memos. Amounts default to each bill's open balance and each credit's remaining balance. Returns payment details and a link to view in QuickBooks.",
+    description: "Create a bill payment (the QBO 'check' / 'pay bills' flow) that applies Accounts Payable transactions for one vendor. Apply bills, vendor credits, or any of JournalEntry, Deposit and Purchase via linked_txns. The side of each (charge it settles, or credit it offsets) is derived from the transaction itself, never declared by the caller; the payment total is charges minus credits. Amounts default to each transaction's open amount and may be set lower to apply it partially. A $0 application (credits fully offsetting charges) needs no payment_account. Use this to record vendor ACH/EFT debits or checks so the bank feed can match them. Defaults to draft: true for a preview; returns payment details and a link to view in QuickBooks once committed.",
     inputSchema: {
       type: "object",
       properties: {
         vendor_name: {
           type: "string",
-          description: "Vendor display name (e.g., 'US Foods'). Will be looked up to get ID.",
+          description: "Vendor display name (e.g., 'North Produce'). Will be looked up to get ID.",
         },
         vendor_id: {
           type: "string",
@@ -1687,7 +1688,7 @@ export const toolDefinitions = [
         },
         payment_account: {
           type: "string",
-          description: "Bank account name or number the payment is drawn from (e.g., 'PLAT BUS CHECKING', '5752'). Only Bank-type accounts are matched, so a partial name cannot resolve to an expense or liability account.",
+          description: "Bank account name or number the payment is drawn from (e.g., '1010 Checking', '1010'). Required unless the payment total is $0. Only Bank-type accounts are matched, so a partial name cannot resolve to an expense or liability account.",
         },
         txn_date: {
           type: "string",
@@ -1703,7 +1704,7 @@ export const toolDefinitions = [
         },
         bills: {
           type: "array",
-          description: "Bills to pay. Each bill must belong to the vendor and have an open balance.",
+          description: "Bills to pay (optional if credits or linked_txns supply a charge). Each bill must belong to the vendor and have an open balance.",
           items: {
             type: "object",
             properties: {
@@ -1737,12 +1738,35 @@ export const toolDefinitions = [
             required: ["vendor_credit_id"],
           },
         },
+        linked_txns: {
+          type: "array",
+          description: "Other Accounts Payable transactions to apply, by type. Its side comes from how it posts to A/P for the vendor: a JournalEntry whose A/P lines net to a debit is a credit, one that nets to a credit is a charge; a Deposit A/P line is a charge; a Purchase is a credit (a credit-card-credit Purchase is a charge). Bill and VendorCredit are also accepted here.",
+          items: {
+            type: "object",
+            properties: {
+              txn_type: {
+                type: "string",
+                enum: [...LINKED_TXN_TYPES],
+                description: "QBO transaction type to apply",
+              },
+              txn_id: {
+                type: "string",
+                description: "ID of the transaction to apply",
+              },
+              amount: {
+                type: "number",
+                description: "Amount to apply (optional, defaults to the transaction's full open amount; may be lower to apply it partially)",
+              },
+            },
+            required: ["txn_type", "txn_id"],
+          },
+        },
         draft: {
           type: "boolean",
           description: "If true, validate and show preview without creating (default: true)",
         },
       },
-      required: ["payment_account", "txn_date", "bills"],
+      required: ["txn_date"],
     },
   },
   {
@@ -1839,7 +1863,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_bill_payment",
-    description: "Fetch a single bill payment by ID with full details including SyncToken. Shows vendor, date, pay type, bank account, linked bills/credits with applied amounts, and flags any unapplied amount (payment total not matching net applied lines).",
+    description: "Fetch a single bill payment by ID with full details including SyncToken. Shows vendor, date, pay type, bank account, each linked transaction (bill, vendor credit, journal entry, deposit or purchase) with its applied amount signed by side (credits negative, charges positive), and flags any unapplied amount (payment total not matching net applied lines).",
     inputSchema: {
       type: "object",
       properties: {

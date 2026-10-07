@@ -389,7 +389,9 @@ level only; the absence of a line-level parameter is the API's shape, not a gap
 in the tools.
 
 `create_bill_payment` is the same story: its lines are `LinkedTxn` references to
-the bills being paid, and the payee is the header `VendorRef`.
+the Accounts Payable transactions being applied (bills, vendor credits and the
+other types under "Bill Payment Lines" below), and the payee is the header
+`VendorRef`.
 
 ## Report Payloads Do Not Describe Themselves
 
@@ -586,6 +588,70 @@ returns it bare: ten `*Prefs` sections plus `Id`, `SyncToken` and `MetaData`.
   closing date as a positive control that the search did find. Because of this,
   `get_preferences` has no redaction step and passes the object through
   unmodified.
+
+## Bill Payment Lines Link Any A/P Transaction
+
+A `BillPayment` line carries one `LinkedTxn` (`TxnId`, `TxnType`) and a positive
+`Amount`. The line type is not limited to bills: `create_bill_payment` accepts
+`Bill`, `VendorCredit`, `JournalEntry`, `Deposit` and `Purchase`, and
+`get_bill_payment` signs every line with the same rules. The header `TotalAmt` is
+charge-side lines minus credit-side lines, so it is never the sum of the
+`Amount`s once a credit is applied.
+
+The side is never supplied by the caller. It follows from how the linked
+transaction posts to Accounts Payable for the vendor (positive credits A/P,
+negative debits A/P):
+
+| `TxnType` | Side | Open amount |
+|-----------|------|-------------|
+| `Bill` | charge | `Balance` |
+| `VendorCredit` | credit | `Balance`, else `TotalAmt` |
+| `JournalEntry` | A/P lines for the vendor net to a Credit: charge. Net to a Debit: credit | \|net\| minus amount already applied |
+| `Deposit` | an A/P line naming the vendor (e.g. a vendor refund): charge | \|sum\| minus amount already applied |
+| `Purchase` | A/P expense line: credit. `Credit: true` (credit-card credit): charge | \|sum\| minus amount already applied |
+
+### $0 payment shape
+
+A bill payment whose credits fully offset its charges has `TotalAmt` 0 and needs
+no bank account. QBO stores one as `PayType: "Check"` with
+`CheckPayment: { PrintStatus: "NotSet" }` and no `BankAccountRef`. The tool sends
+that shape when `payment_account` is omitted and the total is $0, and requires
+`payment_account` for any total above $0.
+
+### How open amounts are derived
+
+`Bill` and `VendorCredit` carry their own `Balance`. `JournalEntry`, `Deposit`
+and `Purchase` carry none, and only a JournalEntry lists its applying
+bill payments. So the tool queries the vendor's bill payments
+(`select * from BillPayment where VendorRef = '<id>'`), sums each line's
+`Amount` per `(TxnType, TxnId)`, and subtracts that from the transaction's A/P
+magnitude for the vendor. The query runs only when one of those three types is
+requested. A scan that hits the safety limit is an error, never a partial total.
+
+### Documented
+
+- Intuit's minor-version-38 linked-transaction notes list `Bill`,
+  `VendorCredit`, `JournalEntry` and `Deposit` as `BillPayment` line links
+  supported through the API.
+- Read-only observation of existing company data showed all five types above on
+  `BillPayment` lines (`Purchase` only on UI-created payments), every line
+  `Amount` positive, and $0 `Check` payments whose `CheckPayment` has only
+  `PrintStatus`.
+
+### Unverified
+
+No writes against a live company are permitted, so these are not yet proven
+through the API:
+
+- Acceptance of `JournalEntry`, `Deposit` and `Purchase` links on a `BillPayment`
+  created through the API. `Purchase` is the least likely, since it appears only
+  in UI-created data.
+- Acceptance of a $0 `BillPayment` with no `BankAccountRef`.
+- Whether a JournalEntry with several A/P lines for the vendor is one netted link
+  keyed by `(TxnType, TxnId)` rather than one link per line (`TxnLineId`).
+
+If QBO rejects a type, drop it from `LINKED_TXN_TYPES`; until then QBO's own error
+reaches the caller through `formatQboError`.
 
 ## References
 
