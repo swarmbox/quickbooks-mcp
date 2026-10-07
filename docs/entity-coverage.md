@@ -122,7 +122,7 @@ does the aging arithmetic.
 | Bill | ✅ | header `APAccountRef` (credit) + expense lines (debit) |
 | Invoice | ✅ | `DepositToAccountRef`/`Deposit` (debit) + income lines (credit). A/R invisible. |
 | Payment | ✅ | header `DepositToAccountRef` (debit). A/R invisible. |
-| BillPayment | ⚠️ | `CheckPayment.BankAccountRef` or `CreditCardPayment.CCAccountRef` (credit) only. **No `APAccountRef` in the payload** — the A/P debit is invisible. |
+| BillPayment | ⚠️ | `CheckPayment.BankAccountRef` or `CreditCardPayment.CCAccountRef` (credit) only. **No `APAccountRef` in the payload** — the A/P debit is invisible. A $0 payment (credits offsetting charges) carries no `BankAccountRef`. |
 | VendorCredit | ✅ | `APAccountRef` (debit) + expense lines (credit) |
 | Transfer | ✅ | `ToAccountRef` (debit) + `FromAccountRef` (credit) |
 | CreditMemo | ✅ | income lines (debit). A/R invisible. |

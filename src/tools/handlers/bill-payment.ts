@@ -1,12 +1,15 @@
 // Handlers for bill payment tools (create, get)
 //
-// A BillPayment is the QBO entity behind the "check" / "pay bills" flow:
-// it pays one or more Bills and can apply VendorCredits, clearing A/P.
+// A BillPayment is the QBO entity behind the "check" / "pay bills" flow. Each
+// line applies one A/P transaction for the vendor: Bills and the other charges
+// it settles, and VendorCredits and the other credits it applies against them
+// (see bill-payment-links.ts for the full set and how each side is decided).
 // This is distinct from an Expense (Purchase), which books expense lines
 // directly and does NOT touch existing bills.
 
 import QuickBooks from "node-quickbooks";
 import { formatAttachmentLines } from "./attachment.js";
+import { collectLinkRequests, resolveLinks, linkSides, LINK_KINDS, type ResolvedLink } from "./bill-payment-links.js";
 import {
   promisify,
   promisifyWrite,
@@ -16,25 +19,43 @@ import {
   resolveVendorRef,
   toQboRef,
 } from "../../client/index.js";
-import { buildQboUrl, validateAmount, toCents, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
+import { buildQboUrl, toCents, toDollars, formatDollars, sumCents, outputReport } from "../../utils/index.js";
 
-interface BillPaymentBillInput {
-  bill_id: string;
-  amount?: number;
+/** Error messages name a link by its label, e.g. `Journal entry 300 (#JE-1)`. */
+function linkLabel(link: ResolvedLink): string {
+  return `${LINK_KINDS[link.type].label} ${link.id} (#${link.doc || "?"})`;
 }
 
-interface BillPaymentCreditInput {
-  vendor_credit_id: string;
-  amount?: number;
+/**
+ * The applied lines shared by the draft preview and the created result. Listings
+ * name a link by its QBO TxnType and show what stays open after this payment.
+ */
+function formatLinkLines(links: ResolvedLink[]): string[] {
+  return links.map((l) =>
+    `  ${l.type} ${l.id} (#${l.doc || "?"}, ${l.date || "?"}) — ${l.side}: ` +
+    `open $${formatDollars(l.openCents)}, applying $${formatDollars(l.applyCents)}, ` +
+    `remaining $${formatDollars(l.openCents - l.applyCents)}`
+  );
 }
 
-interface FetchedTxn {
-  Id: string;
-  DocNumber?: string;
-  TxnDate?: string;
-  TotalAmt?: number;
-  Balance?: number;
-  VendorRef?: { value: string; name?: string };
+/**
+ * The rejection for credits that exceed charges. Never caps a credit: it names
+ * the last credit-side entry, in input order, large enough to absorb the excess
+ * on its own, and the change that brings the total to exactly $0.
+ */
+function excessCreditMessage(links: ResolvedLink[], chargeCents: number, creditCents: number): string {
+  const excessCents = creditCents - chargeCents;
+  const opening =
+    `Credits ($${formatDollars(creditCents)}) exceed charges ($${formatDollars(chargeCents)}) ` +
+    `by $${formatDollars(excessCents)}, and a bill payment total cannot be negative.`;
+
+  const absorber = links.filter((l) => l.side === "credit" && l.applyCents >= excessCents).pop();
+  if (!absorber) {
+    return `${opening} Reduce the credit amounts by $${formatDollars(excessCents)} in total.`;
+  }
+  return absorber.applyCents > excessCents
+    ? `${opening} To bring it to $0, set amount: ${formatDollars(absorber.applyCents - excessCents)} on ${linkLabel(absorber)}.`
+    : `${opening} To bring it to $0, remove ${linkLabel(absorber)}.`;
 }
 
 export async function handleCreateBillPayment(
@@ -42,172 +63,103 @@ export async function handleCreateBillPayment(
   args: {
     vendor_name?: string;
     vendor_id?: string;
-    payment_account: string;
+    payment_account?: string;
     txn_date: string;
     memo?: string;
     doc_number?: string;
-    bills: BillPaymentBillInput[];
-    credits?: BillPaymentCreditInput[];
+    bills?: Array<{ bill_id: string; amount?: number }>;
+    credits?: Array<{ vendor_credit_id: string; amount?: number }>;
+    linked_txns?: Array<{ txn_type: string; txn_id: string; amount?: number }>;
     draft?: boolean;
   }
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
-  const {
-    vendor_name, vendor_id, payment_account, txn_date,
-    memo, doc_number, bills, credits = [], draft = true,
-  } = args;
+  const { vendor_name, vendor_id, payment_account, txn_date, memo, doc_number, draft = true } = args;
 
-  if (!bills || bills.length === 0) {
-    throw new Error("At least one bill is required");
-  }
+  // Merge bills, credits and linked_txns in that order: the payload keeps
+  // today's line order for bills/credits callers.
+  const requests = collectLinkRequests(args);
 
-  // Get cached lookups
-  const [acctCache, vendorCacheData] = await Promise.all([
-    getAccountCache(client),
-    getVendorCache(client),
-  ]);
-
-  // Resolve vendor
-  let vendorRef: { value: string; name: string };
-  if (vendor_id) {
-    vendorRef = resolveVendorRef(vendorCacheData, vendor_id);
-  } else if (vendor_name) {
-    vendorRef = resolveVendorRef(vendorCacheData, vendor_name);
-  } else {
+  const vendorKey = vendor_id || vendor_name;
+  if (!vendorKey) {
     throw new Error("Either vendor_name or vendor_id is required");
   }
+  const vendorRef = resolveVendorRef(await getVendorCache(client), vendorKey);
 
   // Resolve bank account. Restricted to Bank-type: this tool moves money, and an
   // unrestricted partial match can land on an account that merely shares digits or
   // words with the intended one (on this chart of accounts "Payroll" resolves to
   // an accrued-wages liability, not the payroll checking account). A Check-type
   // BillPayment requires a Bank account anyway.
-  const bankAccountRef = toQboRef(
-    resolveAccountRef(acctCache, payment_account, {
-      label: "Payment account",
-      accountType: "Bank",
-    })
-  );
+  const bankAccountRef = payment_account
+    ? toQboRef(
+        resolveAccountRef(await getAccountCache(client), payment_account, {
+          label: "Payment account",
+          accountType: "Bank",
+        })
+      )
+    : undefined;
 
-  // Fetch each bill: validates it exists, belongs to the vendor, and supplies
-  // the open balance as the default amount to apply.
-  const fetchedBills = await Promise.all(
-    bills.map(async (b) => {
-      const bill = await promisify<unknown>((cb) => client.getBill(b.bill_id, cb)) as FetchedTxn;
-      if (bill.VendorRef?.value !== vendorRef.value) {
-        throw new Error(
-          `Bill ${b.bill_id} (#${bill.DocNumber || "?"}) belongs to vendor "${bill.VendorRef?.name || bill.VendorRef?.value}", not "${vendorRef.name}"`
-        );
-      }
-      // API-sourced value: round to cents (validateAmount is for user input)
-      const openCents = toCents(bill.Balance ?? 0);
-      let applyCents: number;
-      if (b.amount !== undefined) {
-        applyCents = validateAmount(b.amount, `Bill ${b.bill_id} amount`);
-        if (applyCents <= 0) {
-          throw new Error(`Bill ${b.bill_id}: amount must be positive`);
-        }
-        if (applyCents > openCents) {
-          throw new Error(
-            `Bill ${b.bill_id} (#${bill.DocNumber || "?"}): amount $${formatDollars(applyCents)} exceeds open balance $${formatDollars(openCents)}`
-          );
-        }
-      } else {
-        if (openCents === 0) {
-          throw new Error(`Bill ${b.bill_id} (#${bill.DocNumber || "?"}) has no open balance — already paid?`);
-        }
-        applyCents = openCents;
-      }
-      return { id: bill.Id, doc: bill.DocNumber, date: bill.TxnDate, applyCents };
-    })
-  );
+  const links = await resolveLinks(client, vendorRef, requests);
 
-  // Fetch each vendor credit; default applied amount is its remaining balance.
-  const fetchedCredits = await Promise.all(
-    credits.map(async (c) => {
-      const vc = await promisify<unknown>((cb) => client.getVendorCredit(c.vendor_credit_id, cb)) as FetchedTxn;
-      if (vc.VendorRef?.value !== vendorRef.value) {
-        throw new Error(
-          `Vendor credit ${c.vendor_credit_id} (#${vc.DocNumber || "?"}) belongs to vendor "${vc.VendorRef?.name || vc.VendorRef?.value}", not "${vendorRef.name}"`
-        );
-      }
-      // VendorCredit.Balance is the unapplied remainder; fall back to TotalAmt.
-      // API-sourced value: round to cents (validateAmount is for user input).
-      const availCents = toCents(vc.Balance ?? vc.TotalAmt ?? 0);
-      let applyCents: number;
-      if (c.amount !== undefined) {
-        applyCents = validateAmount(c.amount, `Vendor credit ${c.vendor_credit_id} amount`);
-        if (applyCents <= 0) {
-          throw new Error(`Vendor credit ${c.vendor_credit_id}: amount must be positive`);
-        }
-        if (applyCents > availCents) {
-          throw new Error(
-            `Vendor credit ${c.vendor_credit_id} (#${vc.DocNumber || "?"}): amount $${formatDollars(applyCents)} exceeds available credit $${formatDollars(availCents)}`
-          );
-        }
-      } else {
-        if (availCents === 0) {
-          throw new Error(`Vendor credit ${c.vendor_credit_id} (#${vc.DocNumber || "?"}) has no remaining balance — already applied?`);
-        }
-        applyCents = availCents;
-      }
-      return { id: vc.Id, doc: vc.DocNumber, date: vc.TxnDate, applyCents };
-    })
-  );
+  const chargeCents = sumCents(links.filter((l) => l.side === "charge").map((l) => l.applyCents));
+  const creditCents = sumCents(links.filter((l) => l.side === "credit").map((l) => l.applyCents));
+  const totalCents = chargeCents - creditCents;
 
-  const billCents = sumCents(fetchedBills.map(b => b.applyCents));
-  const creditCents = sumCents(fetchedCredits.map(c => c.applyCents));
-  const totalCents = billCents - creditCents;
-
-  if (totalCents < 0) {
+  if (chargeCents === 0) {
     throw new Error(
-      `Applied credits ($${formatDollars(creditCents)}) exceed bill amounts ($${formatDollars(billCents)}) — payment total cannot be negative`
+      "Nothing to pay: at least one charge-side transaction is required (a Bill, or a JournalEntry, " +
+      "Deposit or Purchase that credits Accounts Payable for the vendor)"
+    );
+  }
+  if (totalCents < 0) {
+    throw new Error(excessCreditMessage(links, chargeCents, creditCents));
+  }
+  // QBO stores a $0 application with no bank account; anything that moves
+  // money needs one.
+  if (!bankAccountRef && totalCents > 0) {
+    throw new Error(
+      `payment_account is required: the payment total is $${formatDollars(totalCents)}. ` +
+      "Only a $0 application may omit it."
     );
   }
 
-  // Build QuickBooks BillPayment object (Check pay type — covers EFT/ACH too)
+  // Build QuickBooks BillPayment object (Check pay type — covers EFT/ACH too).
+  // A $0 application without an account is sent as QBO itself stores one.
   const bpObject: Record<string, unknown> = {
     VendorRef: vendorRef,
     PayType: "Check",
-    CheckPayment: { BankAccountRef: bankAccountRef },
+    CheckPayment: bankAccountRef ? { BankAccountRef: bankAccountRef } : { PrintStatus: "NotSet" },
     TxnDate: txn_date,
     TotalAmt: toDollars(totalCents),
     ...(memo && { PrivateNote: memo }),
     ...(doc_number && { DocNumber: doc_number }),
-    Line: [
-      ...fetchedBills.map((b) => ({
-        Amount: toDollars(b.applyCents),
-        LinkedTxn: [{ TxnId: b.id, TxnType: "Bill" }],
-      })),
-      ...fetchedCredits.map((c) => ({
-        Amount: toDollars(c.applyCents),
-        LinkedTxn: [{ TxnId: c.id, TxnType: "VendorCredit" }],
-      })),
-    ],
+    Line: links.map((l) => ({
+      Amount: toDollars(l.applyCents),
+      LinkedTxn: [{ TxnId: l.id, TxnType: l.type }],
+    })),
   };
+
+  const bankAccountLine = `Bank Account: ${bankAccountRef ? bankAccountRef.name : "(none — $0 application)"}`;
+  const appliedSection = [
+    "Applied:",
+    ...formatLinkLines(links),
+    "",
+    `Charges: $${formatDollars(chargeCents)}`,
+    `Credits: $${formatDollars(creditCents)}`,
+    `Payment total: $${formatDollars(totalCents)}`,
+  ];
 
   if (draft) {
     const preview = [
       "DRAFT - Bill Payment (Check) Preview",
       "",
       `Vendor: ${vendorRef.name}`,
-      `Bank Account: ${bankAccountRef.name}`,
+      bankAccountLine,
       `Date: ${txn_date}`,
       `Ref no.: ${doc_number || "(auto-assign)"}`,
       `Memo: ${memo || "(none)"}`,
       "",
-      "Bills paid:",
-      ...fetchedBills.map(b =>
-        `  Bill ${b.id} (#${b.doc || "?"}, ${b.date || "?"}): $${formatDollars(b.applyCents)}`
-      ),
-      ...(fetchedCredits.length > 0 ? [
-        "",
-        "Credits applied:",
-        ...fetchedCredits.map(c =>
-          `  Credit ${c.id} (#${c.doc || "?"}, ${c.date || "?"}): -$${formatDollars(c.applyCents)}`
-        ),
-      ] : []),
-      "",
-      `Payment total: $${formatDollars(totalCents)}`,
+      ...appliedSection,
       "",
       "Set draft=false to create this bill payment.",
     ].join("\n");
@@ -228,14 +180,11 @@ export async function handleCreateBillPayment(
     "Bill Payment Created!",
     "",
     `Vendor: ${vendorRef.name}`,
-    `Bank Account: ${bankAccountRef.name}`,
+    bankAccountLine,
     `Ref no.: ${result.DocNumber || "(auto-assigned)"}`,
     `Date: ${txn_date}`,
-    `Bills paid: ${fetchedBills.map(b => `#${b.doc || b.id}`).join(", ")}`,
-    ...(fetchedCredits.length > 0
-      ? [`Credits applied: ${fetchedCredits.map(c => `#${c.doc || c.id}`).join(", ")}`]
-      : []),
-    `Total: $${formatDollars(totalCents)}`,
+    "",
+    ...appliedSection,
     "",
     `View in QuickBooks: ${qboUrl}`,
   ].join("\n");
@@ -273,15 +222,17 @@ export async function handleGetBillPayment(
 
   const payAcct = bp.CheckPayment?.BankAccountRef || bp.CreditCardPayment?.CCAccountRef;
 
-  // Net applied = bill applications minus vendor-credit applications.
-  // QBO stores credit lines with positive amounts but TotalAmt is the net
-  // check amount (bills − credits), so credits must be signed negative here.
-  // Surfaces any unapplied remainder — a common source of bills that stay
-  // open after a payment was matched.
-  const appliedCents = sumCents((bp.Line || []).map(l => {
-    const isCredit = l.LinkedTxn?.some(t => t.TxnType === "VendorCredit");
-    return isCredit ? -toCents(l.Amount) : toCents(l.Amount);
-  }));
+  // Each line is signed by the side its linked transaction posts to A/P:
+  // QBO stores every Amount positive, but TotalAmt is charges minus credits.
+  // A side that cannot be determined is unknown and suppresses the net check
+  // rather than guessing. Surfaces any unapplied remainder — a common source
+  // of bills that stay open after a payment was matched.
+  const sides = await linkSides(client, bp.VendorRef?.value ?? "", bp.Line || []);
+  const linked = (bp.Line || []).flatMap((l) =>
+    (l.LinkedTxn || []).map((txn) => ({ txn, cents: toCents(l.Amount), side: sides.get(`${txn.TxnType}:${txn.TxnId}`) }))
+  );
+  const unknownCount = linked.filter((l) => l.side === undefined).length;
+  const appliedCents = sumCents(linked.map((l) => (l.side === "credit" ? -l.cents : l.cents)));
   const totalCents = toCents(bp.TotalAmt || 0);
   const unappliedCents = totalCents - appliedCents;
 
@@ -301,14 +252,15 @@ export async function handleGetBillPayment(
     'Applied to:',
   ];
 
-  for (const line of bp.Line || []) {
-    for (const txn of line.LinkedTxn || []) {
-      const sign = txn.TxnType === "VendorCredit" ? "-" : "";
-      lines.push(`  ${txn.TxnType} ${txn.TxnId}: ${sign}$${line.Amount.toFixed(2)}`);
-    }
+  for (const { txn, cents, side } of linked) {
+    const sign = side === "credit" ? "-" : "";
+    const label = side ?? "side unknown";
+    lines.push(`  ${txn.TxnType} ${txn.TxnId}: ${sign}$${formatDollars(cents)} (${label})`);
   }
 
-  if (unappliedCents !== 0) {
+  if (unknownCount > 0) {
+    lines.push('', `*** Net applied not verified: could not classify ${unknownCount} linked transaction(s)`);
+  } else if (unappliedCents !== 0) {
     lines.push('');
     lines.push(unappliedCents > 0
       ? `*** UNAPPLIED AMOUNT: $${formatDollars(unappliedCents)} — payment total exceeds applied lines`

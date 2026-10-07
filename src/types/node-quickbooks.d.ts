@@ -66,6 +66,7 @@ declare module "node-quickbooks" {
     findJournalEntries(criteria: object | string, callback: Callback<unknown>): void;
     findPurchases(criteria: object | string, callback: Callback<unknown>): void;
     findPayments(criteria: object | string, callback: Callback<unknown>): void;
+    findBillPayments(criteria: object | string, callback: Callback<unknown>): void;
     createPayment(payment: object, callback: Callback<unknown>): void;
     findPaymentMethods(callback: Callback<unknown>): void;
     getPayment(id: string, callback: Callback<unknown>): void;
