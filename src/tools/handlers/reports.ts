@@ -4,8 +4,13 @@ import QuickBooks from "node-quickbooks";
 import { getAccountCache, promisify, resolveDepartmentId, withRetry } from "../../client/index.js";
 import { outputReport } from "../../utils/index.js";
 import {
+  BEGINNING_OF_BOOKS,
   analyzeTrialBalance,
+  appliedAsOf,
+  assertAppliedAsOf,
+  describeAsOf,
   extractReportSummary,
+  isIsoDate,
   parseTrialBalance,
   renderTrialBalanceFlags,
 } from "../../reports/index.js";
@@ -66,9 +71,12 @@ export async function handleGetBalanceSheet(
 
   const options: Record<string, string> = {};
   if (as_of_date) {
+    if (!isIsoDate(as_of_date)) {
+      throw new Error(`Invalid as_of_date "${as_of_date}" — expected YYYY-MM-DD.`);
+    }
     // Balance sheet needs both start_date and end_date
     // Set start_date to beginning of time for point-in-time report
-    options.start_date = "1970-01-01";
+    options.start_date = BEGINNING_OF_BOOKS;
     options.end_date = as_of_date;
   }
   if (summarize_by) options.summarize_column_by = summarize_by;
@@ -79,9 +87,20 @@ export async function handleGetBalanceSheet(
     promisify<unknown>((cb) => client.reportBalanceSheet(options, cb))
   ) as QBReport;
 
+  // The balance sheet is the dedicated tool's point-in-time report, checked for
+  // the same reason as get_report's: QBO answers a request it cannot honour as of
+  // today, and those figures would be mistaken for the requested date's.
+  let asOfLine: string | undefined;
+  if (as_of_date) {
+    const applied = appliedAsOf(result.Header);
+    assertAppliedAsOf("balance_sheet", as_of_date, applied);
+    asOfLine = describeAsOf(applied, as_of_date);
+  }
+
   const summary = extractReportSummary(result, "Balance Sheet", {
     detail: detail_level === "account",
     allColumns: columns === "all",
+    asOfLine,
   });
   return outputReport("balance-sheet", result, summary, { includeRaw: include_raw });
 }

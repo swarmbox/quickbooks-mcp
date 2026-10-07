@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type QuickBooks from "node-quickbooks";
 
 import { handleGetReport } from "../../src/tools/handlers/report.js";
+import { BEGINNING_OF_BOOKS } from "../../src/reports/index.js";
 import { setOutputMode } from "../../src/utils/output.js";
 
 before(() => setOutputMode("http"));
@@ -15,20 +16,51 @@ const REPORT = {
   Rows: { Row: [{ ColData: [{ value: "North Supply" }, { value: "100.00" }, { value: "100.00" }] }] },
 };
 
+// The date QBO answers as of when it is given none: an invented "today".
+const TODAY = "2026-10-07";
+
+// A report whose header is `header`, whatever the request was.
+function reportWith(header: Record<string, unknown>) {
+  return { ...REPORT, Header: { ReportName: "AgedPayables", ...header } };
+}
+
 // Records what criteria the handler passed, so the tests can assert on the
-// query QBO would have received.
+// query QBO would have received. It mimics QBO's dating: a report_date is
+// echoed into the header as EndPeriod and as an Option entry, and without one
+// the report is answered as of today.
 function fakeClient() {
   const seen: Record<string, Record<string, string>> = {};
   const stub = (method: string) => (options: Record<string, string>, cb: Callback<unknown>) => {
     seen[method] = options;
-    cb(null, REPORT);
+    const date = options.report_date;
+    cb(null, date
+      ? reportWith({ EndPeriod: date, Option: [{ Name: "report_date", Value: date }] })
+      : reportWith({ EndPeriod: TODAY, DateMacro: "today" }));
   };
   const client = {
     reportAgedPayables: stub("reportAgedPayables"),
     reportGeneralLedgerDetail: stub("reportGeneralLedgerDetail"),
+    reportInventoryValuationSummary: stub("reportInventoryValuationSummary"),
     reportTransactionList: stub("reportTransactionList"),
   } as unknown as QuickBooks;
   return { client, seen };
+}
+
+// A client that answers every report with `header`, whatever it is asked, and
+// counts how often it was asked.
+function headerClient(header: Record<string, unknown>) {
+  const state = { calls: 0 };
+  const answer = (_options: Record<string, string>, cb: Callback<unknown>) => {
+    state.calls++;
+    cb(null, reportWith(header));
+  };
+  const client = {
+    reportAgedPayables: answer,
+    reportGeneralLedgerDetail: answer,
+    reportInventoryValuationSummary: answer,
+    reportVendorBalance: answer,
+  } as unknown as QuickBooks;
+  return { client, state };
 }
 
 async function reject(fn: () => Promise<unknown>): Promise<string> {
@@ -88,6 +120,46 @@ describe("handleGetReport — dating a report", () => {
     assert.deepEqual(seen.reportAgedPayables, { report_date: "2026-06-30" });
   });
 
+  it("inventory-sends-report-date-and-range", async () => {
+    const { client, seen } = fakeClient();
+    await handleGetReport(client, { report: "inventory_valuation_summary", report_date: "2026-06-30" });
+    assert.deepEqual(seen.reportInventoryValuationSummary, {
+      report_date: "2026-06-30", start_date: BEGINNING_OF_BOOKS, end_date: "2026-06-30",
+    });
+  });
+
+  it("inventory-end-date-alone-sends-all-three", async () => {
+    const { client, seen } = fakeClient();
+    await handleGetReport(client, { report: "inventory_valuation_summary", end_date: "2026-06-30" });
+    assert.deepEqual(seen.reportInventoryValuationSummary, {
+      report_date: "2026-06-30", start_date: BEGINNING_OF_BOOKS, end_date: "2026-06-30",
+    });
+  });
+
+  it("inventory-ignores-caller-start-date", async () => {
+    const { client, seen } = fakeClient();
+    await handleGetReport(client, {
+      report: "inventory_valuation_summary", start_date: "2026-06-01", end_date: "2026-06-30",
+    });
+    assert.deepEqual(seen.reportInventoryValuationSummary, {
+      report_date: "2026-06-30", start_date: BEGINNING_OF_BOOKS, end_date: "2026-06-30",
+    });
+  });
+
+  it("adds no date criteria to inventory valuation when no date is given", async () => {
+    const { client, seen } = fakeClient();
+    await handleGetReport(client, { report: "inventory_valuation_summary" });
+    assert.deepEqual(seen.reportInventoryValuationSummary, {});
+  });
+
+  it("still refuses a lone start_date on inventory valuation", async () => {
+    const { client } = fakeClient();
+    const message = await reject(() =>
+      handleGetReport(client, { report: "inventory_valuation_summary", start_date: "2026-06-01" })
+    );
+    assert.match(message, /pass report_date, not start_date/);
+  });
+
   it("rejects report_date on a report that covers a range", async () => {
     const { client } = fakeClient();
     const message = await reject(() =>
@@ -108,6 +180,142 @@ describe("handleGetReport — dating a report", () => {
       accounting_method: "Cash",
       summarize_column_by: "Month",
     });
+  });
+});
+
+describe("handleGetReport — stating and checking the date QuickBooks applied", () => {
+  const textOf = async (client: QuickBooks, args: Parameters<typeof handleGetReport>[1]) =>
+    (await handleGetReport(client, args)).content[0].text.split("\n");
+
+  it("report-refuses-misdated", async () => {
+    // QBO does not reject a request it cannot honour, it answers as of today.
+    const { client } = headerClient({ EndPeriod: TODAY, DateMacro: "today" });
+    const message = await reject(() =>
+      handleGetReport(client, { report: "aged_payables", report_date: "2026-06-30" })
+    );
+    assert.match(message, /aged_payables/);
+    assert.match(message, /2026-06-30/);
+    assert.match(message, /2026-10-07/);
+  });
+
+  it("report-refuses-misdated on every point-in-time shape, not just the aging reports", async () => {
+    const { client } = headerClient({ EndPeriod: TODAY, DateMacro: "today" });
+    for (const report of ["vendor_balance", "inventory_valuation_summary"]) {
+      const message = await reject(() =>
+        handleGetReport(client, { report, report_date: "2026-06-30" })
+      );
+      assert.match(message, new RegExp(report));
+    }
+  });
+
+  it("report-refuses-misdated when the request arrived as end_date", async () => {
+    const { client } = headerClient({ EndPeriod: TODAY, DateMacro: "today" });
+    const message = await reject(() =>
+      handleGetReport(client, { report: "aged_payables", end_date: "2026-06-30" })
+    );
+    assert.match(message, /2026-06-30/);
+    assert.match(message, /2026-10-07/);
+  });
+
+  it("report-states-applied-date-on-range-shaped-header", async () => {
+    // The FIFO shape: the period starts at the beginning of books and ends at
+    // the end_date it was sent, with no report_date Option echoed back.
+    const seen: Record<string, string> = {};
+    const client = {
+      reportInventoryValuationSummary: (options: Record<string, string>, cb: Callback<unknown>) => {
+        Object.assign(seen, options);
+        cb(null, reportWith({
+          ReportName: "InventoryValuationSummary",
+          StartPeriod: BEGINNING_OF_BOOKS, EndPeriod: options.end_date,
+        }));
+      },
+    } as unknown as QuickBooks;
+
+    const out = await textOf(client, {
+      report: "inventory_valuation_summary", report_date: "2026-06-30",
+    });
+    assert.equal(seen.end_date, "2026-06-30");
+    assert.ok(out.includes("As of: 2026-06-30"));
+    assert.ok(!out.some(l => l.startsWith("Period:")));
+  });
+
+  it("report-states-chosen-date-when-undated", async () => {
+    // A company's "all" macro with an Option naming the date QBO chose, and no
+    // EndPeriod: the date is read from the Option and the macro is shown.
+    const { client } = headerClient({
+      ReportName: "VendorBalance", DateMacro: "all",
+      Option: [{ Name: "report_date", Value: "2026-12-31" }],
+      EndPeriod: undefined,
+    });
+    const out = await textOf(client, { report: "vendor_balance" });
+    assert.ok(out.includes('As of: 2026-12-31 (date_macro "all")'));
+  });
+
+  it("report-states-chosen-date-when-undated also covers a report asked for no date", async () => {
+    const { client } = fakeClient();
+    const out = await textOf(client, { report: "aged_payables" });
+    assert.ok(out.includes(`As of: ${TODAY} (date_macro "today")`));
+  });
+
+  it("report-warns-unconfirmed-date", async () => {
+    // Nothing in the header says what was applied. That is not evidence of a
+    // mismatch, so the report is returned, with the gap stated in the line.
+    const { client } = headerClient({ ReportName: "AgedPayables", EndPeriod: undefined });
+    const out = await textOf(client, { report: "aged_payables", report_date: "2026-06-30" });
+    const line = out.find(l => l.startsWith("As of: not stated by QuickBooks"));
+    assert.ok(line, "expected a line saying QuickBooks stated no date");
+    assert.match(line!, /2026-06-30/);
+  });
+
+  it("states the date QuickBooks applied when it matches the request", async () => {
+    const { client } = fakeClient();
+    const out = await textOf(client, { report: "aged_payables", report_date: "2026-06-30" });
+    assert.ok(out.includes("As of: 2026-06-30"));
+  });
+
+  it("report-refuses-non-iso-as-of", async () => {
+    const { client, state } = headerClient({ EndPeriod: "2026-06-30" });
+    const message = await reject(() =>
+      handleGetReport(client, { report: "aged_payables", report_date: "2026-6-30" })
+    );
+    assert.match(message, /YYYY-MM-DD/);
+    assert.equal(state.calls, 0, "the client must not be called with an undated-looking request");
+  });
+
+  it("report-refuses-non-iso-as-of whichever parameter carried it", async () => {
+    const { client, state } = headerClient({ EndPeriod: "2026-06-30" });
+    for (const args of [
+      { report: "aged_payables", end_date: "2026-6-30" },
+      { report: "aged_payables", report_date: "2026-02-30" },
+      { report: "inventory_valuation_summary", report_date: "June 30" },
+    ]) {
+      const message = await reject(() => handleGetReport(client, args));
+      assert.match(message, /YYYY-MM-DD/);
+    }
+    assert.equal(state.calls, 0);
+  });
+
+  it("report-refuses-non-iso-as-of only after unsafe characters are refused by their own message", async () => {
+    const { client, state } = headerClient({ EndPeriod: "2026-06-30" });
+    const message = await reject(() =>
+      handleGetReport(client, { report: "aged_payables", report_date: "2026-06-30&customer=9" })
+    );
+    assert.match(message, /report criteria may contain only/);
+    assert.doesNotMatch(message, /YYYY-MM-DD/);
+    assert.equal(state.calls, 0);
+  });
+
+  it("leaves a range report unchecked, with its Period line", async () => {
+    // A range report states the period it covered, which is not an as-of date
+    // and is never compared with the request.
+    const { client } = headerClient({
+      ReportName: "GeneralLedger", StartPeriod: "2026-06-01", EndPeriod: "2026-06-15",
+    });
+    const out = await textOf(client, {
+      report: "general_ledger", start_date: "2026-06-01", end_date: "2026-06-30",
+    });
+    assert.ok(out.includes("Period: 2026-06-01 to 2026-06-15"));
+    assert.ok(!out.some(l => l.startsWith("As of:")));
   });
 });
 

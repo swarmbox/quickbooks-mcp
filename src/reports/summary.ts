@@ -13,6 +13,9 @@ export interface ReportSummaryOptions {
   // is nothing extra to show and it is ignored. Without it the per-member values
   // appear nowhere in the rendered output, only in the raw payload.
   allColumns?: boolean;
+  // A ready-made line stating the report's as-of date. When set it replaces the
+  // "Period:"/"As of:" line derived from the header, and nothing else.
+  asOfLine?: string;
 }
 
 // Labels share the line with one column per member in all-columns mode, so they
@@ -143,7 +146,9 @@ export function extractReportSummary(
 
   // Report title and period
   lines.push(`${header.ReportName || reportType}`);
-  if (header.StartPeriod && header.EndPeriod) {
+  if (options.asOfLine) {
+    lines.push(options.asOfLine);
+  } else if (header.StartPeriod && header.EndPeriod) {
     lines.push(`Period: ${header.StartPeriod} to ${header.EndPeriod}`);
   } else if (header.EndPeriod) {
     lines.push(`As of: ${header.EndPeriod}`);

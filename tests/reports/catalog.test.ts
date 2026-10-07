@@ -65,4 +65,18 @@ describe("report catalog", () => {
     const methods = REPORT_NAMES.map(n => REPORT_CATALOG[n].method);
     assert.equal(new Set(methods).size, methods.length);
   });
+
+  it("catalog-pins-point-in-time-dating", () => {
+    const byReportDate = [
+      "aged_payables", "aged_payable_detail", "aged_receivables", "aged_receivable_detail",
+      "customer_balance", "customer_balance_detail", "vendor_balance", "vendor_balance_detail",
+    ];
+    for (const name of REPORT_NAMES) {
+      const expected =
+        name === "inventory_valuation_summary" ? "report_date_and_range"
+        : byReportDate.includes(name) ? "report_date"
+        : undefined;
+      assert.equal(REPORT_CATALOG[name].pointInTime, expected, `${name} point-in-time dating`);
+    }
+  });
 });

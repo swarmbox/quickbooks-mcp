@@ -105,6 +105,61 @@ describe("renderGenericReport — a report with no sections", () => {
   });
 });
 
+describe("renderGenericReport — a caller-supplied as-of line", () => {
+  // A range-shaped header (the shape a FIFO company answers inventory valuation
+  // with) would otherwise print "Period: 1970-01-01 to …" for a report that is
+  // a single point in time.
+  const RANGE_SHAPED: QBReport = {
+    Header: {
+      ReportName: "InventoryValuationSummary", ReportBasis: "Accrual",
+      StartPeriod: "1970-01-01", EndPeriod: "2026-06-30",
+    },
+    Columns: cols("", "Total"),
+    Rows: { Row: [data("Widget", "100.00")] },
+  } as QBReport;
+
+  it("render-as-of-line-replaces-period", () => {
+    const out = lines(RANGE_SHAPED, { asOfLine: "As of: 2026-06-30" });
+    assert.ok(out.includes("As of: 2026-06-30"));
+    assert.ok(!out.some(l => l.startsWith("Period:")));
+  });
+
+  it("render-as-of-line-replaces-period leaves the title, basis and table alone", () => {
+    const out = lines(RANGE_SHAPED, { asOfLine: "As of: 2026-06-30" });
+    assert.equal(out[0], "InventoryValuationSummary");
+    assert.ok(out.includes("Basis: Accrual"));
+    assert.ok(out.some(l => l.startsWith("Widget") && l.includes("100.00")));
+  });
+
+  it("render-as-of-line-replaces-period stands in for a header with no period at all", () => {
+    const undated = {
+      Header: { ReportName: "VendorBalance", DateMacro: "all" },
+      Columns: cols("", "Total"),
+      Rows: { Row: [data("North Supply", "100.00")] },
+    } as QBReport;
+    const out = lines(undated, { asOfLine: "As of: not stated by QuickBooks" });
+    assert.equal(out[1], "As of: not stated by QuickBooks");
+  });
+
+  it("replaces the As of line a lone EndPeriod would have produced, rather than adding a second", () => {
+    const out = lines(AGING, { asOfLine: 'As of: 2026-06-30 (date_macro "today")' });
+    assert.equal(out.filter(l => l.startsWith("As of:")).length, 1);
+    assert.ok(out.includes('As of: 2026-06-30 (date_macro "today")'));
+  });
+
+  it("renders byte-identically when no as-of line is given", () => {
+    for (const report of [AGING, SECTIONED, RANGE_SHAPED]) {
+      assert.equal(
+        lines(report, { asOfLine: undefined }).join("\n"),
+        renderGenericReport(report)
+      );
+    }
+    // And a range-shaped header still prints its period, so only a caller that
+    // supplies the line changes the output.
+    assert.ok(lines(RANGE_SHAPED).includes("Period: 1970-01-01 to 2026-06-30"));
+  });
+});
+
 describe("renderGenericReport — sections", () => {
   it("prints the section header and its subtotal at summary level", () => {
     const out = lines(SECTIONED);

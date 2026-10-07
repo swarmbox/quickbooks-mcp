@@ -443,13 +443,34 @@ stops bounding the output. Collapse whitespace before laying a report out.
 
 ### A date range on a point-in-time report answers as of *today*
 
-The aging, balance and inventory reports are dated by `report_date`. Given
+The aging and balance reports (`AgedPayables`, `AgedReceivables`,
+`CustomerBalance`, `VendorBalance`) are dated by `report_date`. Given
 `start_date`/`end_date` instead, QBO does not error and does not ignore the
 request — it returns the report as of today, with `EndPeriod` set to today's
 date rather than the range's end. A caller asking for a March aging silently
-gets one dated now. Verified for `AgedPayables`, `AgedReceivables`,
-`CustomerBalance`, `VendorBalance`, and `InventoryValuationSummary`.
-`AccountList` is undated entirely and ignores both.
+gets one dated now. `AccountList` is undated entirely and ignores both.
+
+`InventoryValuationSummary` is different: which parameter dates it depends on
+the company's costing method. On an **average-cost** company it is dated by
+`report_date`; on a **FIFO** company it is dated only by `start_date`/`end_date`.
+A lone `report_date` on a FIFO company, or a lone range on an average-cost one,
+answers as of today with no error. Sending all three — `report_date`, a
+`start_date` at the beginning of the books and an `end_date` — dates it on both
+kinds of company, and that is what `get_report` sends.
+
+**Reading the applied date.** The date QBO applied is in `Header.EndPeriod`, or,
+when `EndPeriod` is absent, in the `Header.Option` entry named `report_date`. An
+undated balance report carries `DateMacro: "all"` in its header.
+
+**Refusal.** `get_report`'s point-in-time reports and `get_balance_sheet` (when
+given `as_of_date`) state the applied date on an `As of` line and refuse a report
+whose stated date differs from the request, instead of returning today's figures
+under the requested date. A header that states no date is not refused; the
+`As of` line says it was not stated.
+
+**Tolerance.** A FIFO valuation total differs from the Balance Sheet inventory
+asset by cents, so any comparison between the two needs a tolerance rather than
+exact equality.
 
 ### Two report methods do not work on a US company
 
