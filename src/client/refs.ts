@@ -12,7 +12,7 @@
 // internal Id first, which the handler chain deliberately does not (handlers take
 // account_id as its own parameter).
 
-import type { AccountCache, VendorCache, EmployeeCache, ClassCache, CachedAccount } from "../types/index.js";
+import type { AccountCache, VendorCache, TermCache, EmployeeCache, ClassCache, CachedAccount } from "../types/index.js";
 
 // QBO ref shape. Accounts carry AcctNum along because callers echo it back in
 // their reports.
@@ -125,10 +125,20 @@ export function resolveAccountRef(
   };
 }
 
+// A resolved payment term. type and dueDays ride along for the bill due-date
+// rule (termDueDays); toQboRef strips them, as it strips AccountRef.acctNum.
+export interface TermRef {
+  value: string;
+  name: string;
+  type?: string;
+  dueDays?: number;
+}
+
 // Narrow a resolved ref to just the fields QBO accepts on a ReferenceType.
-// resolveAccountRef carries acctNum for callers that echo it into reports; that
-// field must not ride along into a request payload.
-export function toQboRef(ref: AccountRef | VendorRef): { value: string; name: string } {
+// resolveAccountRef carries acctNum, and resolveTermRef carries type and
+// dueDays, for callers that use them; those fields must not ride along into a
+// request payload.
+export function toQboRef(ref: AccountRef | VendorRef | TermRef): { value: string; name: string } {
   return { value: ref.value, name: ref.name };
 }
 
@@ -146,6 +156,30 @@ export function resolveVendorRef(cache: VendorCache, nameOrId: string): VendorRe
   if (byPartial) return { value: byPartial.Id, name: byPartial.DisplayName };
 
   throw new Error(`Vendor not found: "${nameOrId}"`);
+}
+
+// Resolve a payment term by internal Id, then exact name (case-insensitive).
+// There is deliberately no partial tier: a fuzzy hit would pick the wrong term
+// and silently move a due date, and the miss error lists the exact names so a
+// caller recovers in one retry. The error text matches the invoice and customer
+// lookups this replaces.
+export function resolveTermRef(cache: TermCache, nameOrId: string): TermRef {
+  const match = cache.byId.get(nameOrId) ?? cache.byName.get(nameOrId.toLowerCase());
+  if (!match) {
+    const available = cache.items.map(t => t.Name).join(", ");
+    throw new Error(`Term not found: "${nameOrId}". Available: ${available}`);
+  }
+  return { value: match.Id, name: match.Name, type: match.Type, dueDays: match.DueDays };
+}
+
+// Days after the transaction date that a term falls due, or undefined when the
+// term has no fixed number (date-driven, or DueDays missing or unusable). The
+// bill due-date rule depends on this: it computes a date only when this returns
+// a number and otherwise asks the caller for an explicit due_date.
+export function termDueDays(term: TermRef): number | undefined {
+  if (term.type !== "STANDARD") return undefined;
+  const days = term.dueDays;
+  return days !== undefined && Number.isInteger(days) && days >= 0 ? days : undefined;
 }
 
 // Resolve a class by internal Id, exact name, exact FullyQualifiedName, or a

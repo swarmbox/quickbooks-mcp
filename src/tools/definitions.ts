@@ -500,7 +500,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_bill",
-    description: "Create a vendor bill. Accepts vendor/account/department names (will lookup IDs automatically). Note: DepartmentRef is header-level only — for multi-department splits, create separate bills (one per department). Returns bill details and a link to view in QuickBooks.",
+    description: "Create a vendor bill. Accepts vendor/account/department names (will lookup IDs automatically). Optionally set payment terms with sales_term_ref (e.g., 'Net 30'); without due_date the due date is computed from the bill date and the term's days. Note: DepartmentRef is header-level only — for multi-department splits, create separate bills (one per department). Returns bill details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -518,7 +518,11 @@ export const toolDefinitions = [
         },
         due_date: {
           type: "string",
-          description: "Due date in YYYY-MM-DD format (optional)",
+          description: "Due date in YYYY-MM-DD format (optional). Always kept as given. If omitted and sales_term_ref is set, it is computed as txn_date plus the term's days.",
+        },
+        sales_term_ref: {
+          type: "string",
+          description: "Payment terms: the term's exact name as QuickBooks lists it (e.g., 'Net 30'), or its Id, matched case-insensitively. A miss lists the available names; query with SELECT * FROM Term shows them too. Without due_date the due date is computed as txn_date plus the term's days; an explicit due_date is kept. Date-driven terms need due_date.",
         },
         department_name: {
           type: "string",
@@ -607,7 +611,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_bill",
-    description: "Fetch a single bill by ID with full details including SyncToken (needed for edits). Returns vendor, date, due date, amount, AP account, line details.",
+    description: "Fetch a single bill by ID with full details including SyncToken (needed for edits). Returns vendor, date, due date, payment terms, amount, AP account, line details.",
     inputSchema: {
       type: "object",
       properties: {
@@ -621,7 +625,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_bill",
-    description: "Modify an existing bill. Can update vendor, date, due date, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
+    description: "Modify an existing bill. Can update vendor, date, due date, payment terms, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
     inputSchema: {
       type: "object",
       properties: {
@@ -639,7 +643,11 @@ export const toolDefinitions = [
         },
         due_date: {
           type: "string",
-          description: "New due date in YYYY-MM-DD format (optional)",
+          description: "New due date in YYYY-MM-DD format (optional). Always kept as given, whether or not sales_term_ref is set.",
+        },
+        sales_term_ref: {
+          type: "string",
+          description: "New payment terms: the term's exact name as QuickBooks lists it (e.g., 'Net 30'), or its Id, matched case-insensitively. A miss lists the available names; query with SELECT * FROM Term shows them too. Without due_date the due date is recomputed as the bill's date (txn_date if also given) plus the term's days, replacing the current one; an explicit due_date is kept. Date-driven terms need due_date. Changing txn_date alone does not change the due date.",
         },
         memo: {
           type: "string",

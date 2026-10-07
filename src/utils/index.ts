@@ -8,3 +8,4 @@ export * from './concurrency.js';
 export * from './errors.js';
 export * from './updates.js';
 export * from './item-line.js';
+export * from './dates.js';

@@ -2,7 +2,7 @@
 
 import QuickBooks from "node-quickbooks";
 import { formatAttachmentLines } from "./attachment.js";
-import { promisify, promisifyWrite, resolveCustomer } from "../../client/index.js";
+import { promisify, promisifyWrite, resolveCustomer, getTermCache, resolveTermRef, describeTermRef, toQboRef } from "../../client/index.js";
 import { buildQboUrl, outputReport, formatUpdateResult } from "../../utils/index.js";
 
 interface AddressInput {
@@ -156,20 +156,9 @@ export async function handleCreateCustomer(
   // Resolve sales term
   let salesTermName: string | undefined;
   if (sales_term_ref) {
-    const terms = await promisify<{ QueryResponse: { Term?: Array<{ Id: string; Name: string }> } }>((cb) =>
-      (client as unknown as Record<string, Function>).findTerms(cb)
-    );
-    const termList = terms.QueryResponse?.Term || [];
-    const match = termList.find(t =>
-      t.Name.toLowerCase() === sales_term_ref.toLowerCase() ||
-      t.Id === sales_term_ref
-    );
-    if (!match) {
-      const available = termList.map(t => t.Name).join(', ');
-      throw new Error(`Term not found: "${sales_term_ref}". Available: ${available}`);
-    }
-    customerObj.SalesTermRef = { value: match.Id, name: match.Name };
-    salesTermName = match.Name;
+    const termRef = toQboRef(resolveTermRef(await getTermCache(client), sales_term_ref));
+    customerObj.SalesTermRef = termRef;
+    salesTermName = termRef.name;
   }
 
   if (draft) {
@@ -252,7 +241,7 @@ export async function handleGetCustomer(
   lines.push(`Phone: ${customer.PrimaryPhone?.FreeFormNumber || "(none)"}`);
   lines.push(`Mobile: ${customer.Mobile?.FreeFormNumber || "(none)"}`);
   lines.push(`Preferred Delivery: ${customer.PreferredDeliveryMethod || "(none)"}`);
-  lines.push(`Terms: ${customer.SalesTermRef?.name || "(none)"}`);
+  lines.push(`Terms: ${await describeTermRef(client, customer.SalesTermRef)}`);
   lines.push(...formatAddress(customer.BillAddr, "Billing Address"));
   lines.push(...formatAddress(customer.ShipAddr, "Shipping Address"));
   if (customer.Notes) lines.push(`Notes: ${customer.Notes}`);
@@ -340,19 +329,7 @@ export async function handleEditCustomer(
 
   // Resolve sales term if provided
   if (sales_term_ref !== undefined) {
-    const terms = await promisify<{ QueryResponse: { Term?: Array<{ Id: string; Name: string }> } }>((cb) =>
-      (client as unknown as Record<string, Function>).findTerms(cb)
-    );
-    const termList = terms.QueryResponse?.Term || [];
-    const match = termList.find(t =>
-      t.Name.toLowerCase() === sales_term_ref.toLowerCase() ||
-      t.Id === sales_term_ref
-    );
-    if (!match) {
-      const available = termList.map(t => t.Name).join(', ');
-      throw new Error(`Term not found: "${sales_term_ref}". Available: ${available}`);
-    }
-    updated.SalesTermRef = { value: match.Id, name: match.Name };
+    updated.SalesTermRef = toQboRef(resolveTermRef(await getTermCache(client), sales_term_ref));
   }
 
   const qboUrl = buildQboUrl("customerdetail", "nameId", id);
@@ -390,7 +367,7 @@ export async function handleEditCustomer(
     if (preferred_delivery_method !== undefined) previewLines.push(`  Preferred Delivery: ${current.PreferredDeliveryMethod || '(none)'} → ${preferred_delivery_method}`);
     if (sales_term_ref !== undefined) {
       const newTerm = (updated.SalesTermRef as { name?: string })?.name || sales_term_ref;
-      previewLines.push(`  Terms: ${current.SalesTermRef?.name || '(none)'} → ${newTerm}`);
+      previewLines.push(`  Terms: ${await describeTermRef(client, current.SalesTermRef)} → ${newTerm}`);
     }
 
     previewLines.push("");
