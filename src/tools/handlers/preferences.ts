@@ -6,31 +6,41 @@ import { outputReport } from "../../utils/index.js";
 import type { QBRef } from "../../types/index.js";
 
 // Only the fields the summary reads. QBO omits a key entirely when it is unset,
-// so everything is optional; a present `false` is a real answer.
+// so everything is optional; a present `false` is a real answer. A present
+// `null` is not expected from the API but is treated as absent, never rendered.
+type Maybe<T> = T | null;
 interface Preferences {
   AccountingInfoPrefs?: {
-    BookCloseDate?: string;
-    TrackDepartments?: boolean;
-    DepartmentTerminology?: string;
-    ClassTrackingPerTxn?: boolean;
-    ClassTrackingPerTxnLine?: boolean;
-    FirstMonthOfFiscalYear?: string;
-    UseAccountNumbers?: boolean;
+    BookCloseDate?: Maybe<string>;
+    TrackDepartments?: Maybe<boolean>;
+    DepartmentTerminology?: Maybe<string>;
+    ClassTrackingPerTxn?: Maybe<boolean>;
+    ClassTrackingPerTxnLine?: Maybe<boolean>;
+    FirstMonthOfFiscalYear?: Maybe<string>;
+    UseAccountNumbers?: Maybe<boolean>;
   };
-  ReportPrefs?: { ReportBasis?: string };
-  CurrencyPrefs?: { HomeCurrency?: QBRef; MultiCurrencyEnabled?: boolean };
-  SalesFormsPrefs?: { DefaultTerms?: QBRef };
+  ReportPrefs?: { ReportBasis?: Maybe<string> };
+  CurrencyPrefs?: { HomeCurrency?: Maybe<QBRef>; MultiCurrencyEnabled?: Maybe<boolean> };
+  SalesFormsPrefs?: { DefaultTerms?: Maybe<QBRef> };
   VendorAndPurchasesPrefs?: {
-    DefaultTerms?: QBRef;
-    BillableExpenseTracking?: boolean;
-    DefaultMarkup?: number | string;
+    DefaultTerms?: Maybe<QBRef>;
+    BillableExpenseTracking?: Maybe<boolean>;
+    DefaultMarkup?: Maybe<number | string>;
   };
 }
 
 const onOff = (flag: boolean) => (flag ? "ON" : "OFF");
 
-// A terms ref renders its name, falling back to its id.
-const termsText = (ref: QBRef) => ref.name || `id ${ref.value}`;
+/** `<prefix> <value>` when the value is present (neither null nor undefined), else nothing. */
+function part<T>(prefix: string, value: T | null | undefined, render: (v: T) => string = String): string | undefined {
+  return value == null ? undefined : `${prefix} ${render(value)}`;
+}
+
+// A terms ref renders its name, falling back to its id; a ref with neither renders nothing.
+const termsText = (ref: Maybe<QBRef> | undefined) => ref?.name || (ref?.value ? `id ${ref.value}` : undefined);
+
+// A currency ref renders its bare ISO code; a ref without one renders nothing.
+const currencyText = (ref: Maybe<QBRef> | undefined) => ref?.value || undefined;
 
 /**
  * One digest line: the label plus every part whose source field is present.
@@ -49,7 +59,7 @@ function classTracking(acct: NonNullable<Preferences["AccountingInfoPrefs"]>): s
 }
 
 function departments(acct: NonNullable<Preferences["AccountingInfoPrefs"]>): string | undefined {
-  if (acct.TrackDepartments === undefined) return undefined;
+  if (acct.TrackDepartments == null) return undefined;
   const term = acct.DepartmentTerminology ? ` (terminology "${acct.DepartmentTerminology}")` : "";
   return `departments ${onOff(acct.TrackDepartments)}${term}`;
 }
@@ -59,32 +69,24 @@ export function formatPreferencesSummary(prefs: Preferences): string {
   const acct = prefs?.AccountingInfoPrefs ?? {};
   const purchases = prefs?.VendorAndPurchasesPrefs ?? {};
   const currency = prefs?.CurrencyPrefs ?? {};
-  const salesTerms = prefs?.SalesFormsPrefs?.DefaultTerms;
-  const purchaseTerms = purchases.DefaultTerms;
 
   const digest = [
     digestLine("Accounting:", [
       departments(acct),
       classTracking(acct),
-      acct.FirstMonthOfFiscalYear !== undefined ? `fiscal year starts ${acct.FirstMonthOfFiscalYear}` : undefined,
-      acct.UseAccountNumbers !== undefined ? `account numbers ${onOff(acct.UseAccountNumbers)}` : undefined,
+      part("fiscal year starts", acct.FirstMonthOfFiscalYear),
+      part("account numbers", acct.UseAccountNumbers, onOff),
     ]),
-    digestLine("Reporting: ", [
-      prefs?.ReportPrefs?.ReportBasis !== undefined ? `basis ${prefs.ReportPrefs.ReportBasis}` : undefined,
-    ]),
+    digestLine("Reporting: ", [part("basis", prefs?.ReportPrefs?.ReportBasis)]),
     digestLine("Currency:  ", [
-      currency.HomeCurrency !== undefined ? `home ${currency.HomeCurrency.value}` : undefined,
-      currency.MultiCurrencyEnabled !== undefined ? `multi-currency ${onOff(currency.MultiCurrencyEnabled)}` : undefined,
+      part("home", currencyText(currency.HomeCurrency)),
+      part("multi-currency", currency.MultiCurrencyEnabled, onOff),
     ]),
-    digestLine("Sales:     ", [
-      salesTerms !== undefined ? `default terms ${termsText(salesTerms)}` : undefined,
-    ]),
+    digestLine("Sales:     ", [part("default terms", termsText(prefs?.SalesFormsPrefs?.DefaultTerms))]),
     digestLine("Purchases: ", [
-      purchaseTerms !== undefined ? `default terms ${termsText(purchaseTerms)}` : undefined,
-      purchases.BillableExpenseTracking !== undefined
-        ? `billable expenses ${onOff(purchases.BillableExpenseTracking)}`
-        : undefined,
-      purchases.DefaultMarkup !== undefined ? `markup ${purchases.DefaultMarkup}%` : undefined,
+      part("default terms", termsText(purchases.DefaultTerms)),
+      part("billable expenses", purchases.BillableExpenseTracking, onOff),
+      part("markup", purchases.DefaultMarkup, (m) => `${m}%`),
     ]),
   ].filter((l): l is string => l !== undefined);
 
