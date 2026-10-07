@@ -259,3 +259,69 @@ describe("get_preferences schema", () => {
     assert.match(result.content[0].text, /Unknown parameter "bogus"/);
   });
 });
+
+describe("get_preferences summary on null and empty refs", () => {
+  // QBO omits unset keys, so these shapes are defensive: the formatter must never
+  // throw, and must render a null or empty field as absent, never as text.
+  type Prefs = Parameters<typeof formatPreferencesSummary>[0];
+  const summarize = (prefs: unknown) => formatPreferencesSummary(prefs as Prefs);
+  const DIGEST_LABELS = ["Accounting:", "Reporting:", "Currency:", "Sales:", "Purchases:"];
+
+  it("preferences-null-terms-skipped", () => {
+    const text = summarize({
+      SalesFormsPrefs: { DefaultTerms: null },
+      VendorAndPurchasesPrefs: { DefaultTerms: null },
+    });
+
+    assert.equal(lineStarting(text, "Sales:"), undefined);
+    assert.equal(lineStarting(text, "Purchases:"), undefined);
+  });
+
+  it("preferences-null-home-currency-skipped", () => {
+    const text = summarize({ CurrencyPrefs: { HomeCurrency: null } });
+
+    assert.equal(lineStarting(text, "Currency:"), undefined);
+  });
+
+  it("preferences-empty-home-currency-skipped", () => {
+    const text = summarize({ CurrencyPrefs: { HomeCurrency: {}, MultiCurrencyEnabled: true } });
+
+    const currency = lineStarting(text, "Currency:");
+    assert.ok(currency);
+    assert.ok(currency.includes("multi-currency ON"));
+    assert.ok(!currency.includes("home"));
+    assert.ok(!text.includes("undefined"));
+  });
+
+  it("preferences-empty-terms-skipped", () => {
+    const text = summarize({ SalesFormsPrefs: { DefaultTerms: {} } });
+
+    assert.equal(lineStarting(text, "Sales:"), undefined);
+    assert.ok(!text.includes("undefined"));
+  });
+
+  it("preferences-null-scalars-skipped", () => {
+    const text = summarize({
+      AccountingInfoPrefs: {
+        BookCloseDate: null,
+        TrackDepartments: null,
+        DepartmentTerminology: null,
+        ClassTrackingPerTxn: null,
+        ClassTrackingPerTxnLine: null,
+        FirstMonthOfFiscalYear: null,
+        UseAccountNumbers: null,
+      },
+      ReportPrefs: { ReportBasis: null },
+      CurrencyPrefs: { HomeCurrency: null, MultiCurrencyEnabled: null },
+      SalesFormsPrefs: { DefaultTerms: null },
+      VendorAndPurchasesPrefs: { DefaultTerms: null, BillableExpenseTracking: null, DefaultMarkup: null },
+    });
+
+    assert.ok(text.includes("Books closing date: none set"));
+    for (const label of DIGEST_LABELS) {
+      assert.equal(lineStarting(text, label), undefined, `${label} line is omitted`);
+    }
+    assert.ok(!text.includes("null"));
+    assert.ok(!text.includes("undefined"));
+  });
+});
