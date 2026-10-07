@@ -61,6 +61,16 @@ There is no "merge locally and push to `master`" shortcut. The PR review/merge g
 - Start a branch from an up-to-date master: `git fetch origin && git switch -c <branch> origin/master` (or `git worktree add <path> -b <branch> origin/master`).
 - **Branch naming**: `type/short-desc` — `feat/`, `fix/`, `docs/`, `chore/`, `refactor/`. E.g. `fix/scraper-popup`, `chore/bump-deps`.
 - Give the PR a descriptive title and a body summarizing what changed and why.
+- **One feature per PR.** Each feature, fix or docs change gets its own branch
+  and its own PR. Never bundle two of them into one PR, even when the second
+  builds on the first: a PR with two commits can't be squash-merged without
+  folding them together, and each change deserves its own review.
+- **Several changes waiting? Push them one at a time.** If local commits have
+  piled up (for example, workflow runs that landed on a local `master` ahead of
+  `origin/master`), open a PR for the oldest commit alone. Once it merges,
+  rebase the next one onto the new `origin/master`, re-run the builds and
+  tests, and open its PR. Independent changes can have PRs open at the same
+  time. A change that depends on an unmerged one waits for that one to merge.
 
 ## Architecture
 
