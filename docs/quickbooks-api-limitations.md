@@ -638,15 +638,26 @@ requested. A scan that hits the safety limit is an error, never a partial total.
   `Amount` positive, and $0 `Check` payments whose `CheckPayment` has only
   `PrintStatus`.
 
+### Verified
+
+Proven through the API on the production company (2026-10-07, owner-approved):
+`create_bill_payment` with `draft: false` created a BillPayment, a $0
+`Check` payment with no `BankAccountRef` whose lines link four `Bill`s (charges)
+and one `JournalEntry` (credit, from that JE's single A/P debit for the vendor).
+`get_bill_payment` read it back unchanged and every bill's `Balance` went to 0.
+So these are accepted on create:
+
+- A `BillPayment` line with `LinkedTxn` `TxnType: "JournalEntry"`.
+- A $0 `BillPayment` with `CheckPayment: { PrintStatus: "NotSet" }` and no
+  `BankAccountRef`.
+
 ### Unverified
 
-No writes against a live company are permitted, so these are not yet proven
-through the API:
+Not yet proven through the API:
 
-- Acceptance of `JournalEntry`, `Deposit` and `Purchase` links on a `BillPayment`
-  created through the API. `Purchase` is the least likely, since it appears only
-  in UI-created data.
-- Acceptance of a $0 `BillPayment` with no `BankAccountRef`.
+- Acceptance of `Deposit` and `Purchase` links on a `BillPayment` created
+  through the API. `Purchase` is the least likely, since it appears only in
+  UI-created data.
 - Whether a JournalEntry with several A/P lines for the vendor is one netted link
   keyed by `(TxnType, TxnId)` rather than one link per line (`TxnLineId`).
 
