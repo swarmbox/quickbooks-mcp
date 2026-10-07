@@ -19,7 +19,7 @@ interface AddressInput {
   long?: string;
 }
 
-interface QBAddress {
+export interface QBAddress {
   Line1?: string;
   Line2?: string;
   Line3?: string;
@@ -49,7 +49,7 @@ function buildQBAddress(input: AddressInput): QBAddress {
   return addr;
 }
 
-function formatAddress(addr: QBAddress | undefined, label: string): string[] {
+export function formatAddress(addr: QBAddress | undefined, label: string): string[] {
   if (!addr) return [`${label}: (none)`];
   const parts: string[] = [];
   for (const key of ['Line1', 'Line2', 'Line3', 'Line4', 'Line5'] as const) {
