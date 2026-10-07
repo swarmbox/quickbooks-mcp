@@ -1,6 +1,7 @@
 // Barrel export for tool handlers
 
 export { handleGetCompanyInfo } from './company.js';
+export { handleGetPreferences } from './preferences.js';
 export { handleQuery } from './query.js';
 export { handleListAccounts } from './accounts.js';
 export {

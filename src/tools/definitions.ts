@@ -36,6 +36,15 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "get_preferences",
+    description: "Get company preferences, led by the books closing date, with a digest of accounting, currency, sales and purchase settings. Use this to check whether a period is closed before proposing an entry.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
     name: "query",
     description: "Execute a QuickBooks query using SQL-like syntax. Supports querying any entity type (Customer, Vendor, Invoice, Bill, Account, Item, Department, etc.). Results are written to a file to preserve context. Defaults to MAXRESULTS 1000 if not specified. Examples: 'SELECT * FROM Customer', 'SELECT * FROM SalesReceipt WHERE TxnDate >= \\'2025-11-01\\' AND TxnDate <= \\'2025-11-30\\''",
     inputSchema: {

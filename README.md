@@ -295,6 +295,7 @@ QBO_INLINE_OUTPUT=true
 | **Setup** | |
 | `qbo_authenticate` | Set up OAuth credentials (local mode only) |
 | `get_company_info` | Get connected company information |
+| `get_preferences` | Get company preferences, led by the books closing date (or "none set"), with a digest of accounting, currency, sales and purchase settings |
 | **Query & Reports** | |
 | `query` | Run SQL-like queries against any QuickBooks entity |
 | `list_accounts` | List chart of accounts with filtering |

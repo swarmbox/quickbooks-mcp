@@ -30,9 +30,33 @@ entities fall in that gap:
 | RecurringTransaction | A template, not a posting transaction. |
 | TaxClassification | Reference data. |
 
-`src/query/pagination.ts` resolves this automatically: `fetcherForEntity()` uses
-the wrapper method when one exists and raw REST otherwise, so `query` reaches
-every queryable entity without an allow-list to maintain.
+`query` derives the finder name as `find${entity}s`, plus a four-entry
+`pluralMap` in `src/tools/handlers/query.ts` for the irregular plurals.
+`fetcherForEntity()` in `src/query/pagination.ts` uses the wrapper only when
+that derived method exists on the client, and raw REST otherwise. `query`
+therefore reaches every queryable entity without an allow-list to maintain.
+
+Three wrapped entities take the raw path anyway, because their wrapper's name
+is not the derived one:
+
+| Entity | Derived name (absent) | Actual wrapper |
+|---|---|---|
+| Preferences | `findPreferencess` | `findPreferenceses` |
+| TimeActivity | `findTimeActivitys` | `findTimeActivities` |
+| CompanyCurrency | `findCompanyCurrencys` | `findCompanyCurrencies` |
+
+This is harmless: the raw path sends the same `select * from <entity>`
+statement the wrapper would. That was verified for `Preferences` only;
+`TimeActivity` and `CompanyCurrency` are expected to behave the same but were
+not re-checked.
+
+### Single-object entities: Preferences
+
+`query` on `Preferences` returns `QueryResponse.Preferences` as a one-element
+array and accepts `STARTPOSITION`/`MAXRESULTS` (verified in a sandbox company),
+with the same key paths as the bare object. `get_preferences` is the preferred
+read: it calls `getPreferences()` directly and leads its summary with the books
+closing date.
 
 ### The CreditCardPayment naming trap
 

@@ -8,6 +8,7 @@ import { toolDefinitions as allToolDefinitions } from "./definitions.js";
 import { validateToolArguments, ToolArgumentError, type ToolSchema } from "./validate.js";
 import {
   handleGetCompanyInfo,
+  handleGetPreferences,
   handleQuery,
   handleListAccounts,
   handleGetProfitLoss,
@@ -63,6 +64,7 @@ const toolHandlers = new Map<string, ToolHandler>();
 
 // Register all tools
 toolHandlers.set("get_company_info", (client) => handleGetCompanyInfo(client));
+toolHandlers.set("get_preferences", (client) => handleGetPreferences(client));
 toolHandlers.set("query", (client, args) => handleQuery(client, args as { query: string }));
 toolHandlers.set("list_accounts", (client, args) => handleListAccounts(client, args as { account_type?: string; active_only?: boolean }));
 toolHandlers.set("get_profit_loss", (client, args) => handleGetProfitLoss(client, args as Parameters<typeof handleGetProfitLoss>[1]));

@@ -546,6 +546,26 @@ testing against a sandbox company, and move the result into a section above:
 - [ ] What is the official maximum file size?
 - [ ] What is the official list of accepted file types?
 
+## Preferences (Closing Date)
+
+`get_preferences` reads the company's `Preferences` object. `getPreferences()`
+returns it bare: ten `*Prefs` sections plus `Id`, `SyncToken` and `MetaData`.
+
+- **Is this period closed?** `AccountingInfoPrefs.BookCloseDate` is a
+  `YYYY-MM-DD` string. The key is **omitted** when no closing date is set, so
+  absence means "none set", not an empty value.
+- **The API cannot write it.** Intuit's schema, as mirrored by third-party
+  references, lists the closing date as read-only. This was not confirmed
+  against Intuit's own page.
+- **The closing-date password is not in the payload.** Confirmed in a sandbox
+  company with a closing date and password set, at `minorversion=75` (the
+  node-quickbooks default the client sends). The check was a value-level search
+  over every key and value of both `getPreferences()` and
+  `select * from Preferences` (also with `STARTPOSITION`/`MAXRESULTS`), with the
+  closing date as a positive control that the search did find. Because of this,
+  `get_preferences` has no redaction step and passes the object through
+  unmodified.
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)
