@@ -137,3 +137,44 @@ describe("extractReportSummary — allColumns", () => {
     }
   });
 });
+
+describe("extractReportSummary — asOfLine", () => {
+  const balanceSheet = {
+    Header: {
+      ReportName: "BalanceSheet",
+      StartPeriod: "1970-01-01",
+      EndPeriod: "2026-06-30",
+    },
+    Columns: { Column: [{ ColTitle: "" }, { ColTitle: "Total" }] },
+    Rows: {
+      Row: [
+        {
+          type: "Data",
+          ColData: [{ value: "1000 Checking" }, { value: "100.00" }],
+        },
+      ],
+    },
+  } as QBReport;
+
+  it("summary-as-of-line-replaces-period", () => {
+    const out = extractReportSummary(balanceSheet, "Balance Sheet", {
+      asOfLine: "As of: 2026-06-30",
+    }).split("\n");
+    assert.ok(out.includes("As of: 2026-06-30"));
+    assert.equal(out.filter(l => l.startsWith("Period:")).length, 0);
+  });
+
+  it("summary-as-of-line-replaces-period leaves every other line unchanged", () => {
+    const before = extractReportSummary(balanceSheet, "Balance Sheet").split("\n");
+    const after = extractReportSummary(balanceSheet, "Balance Sheet", {
+      asOfLine: "As of: 2026-06-30",
+    }).split("\n");
+    const periodAt = before.findIndex(l => l.startsWith("Period:"));
+    assert.notEqual(periodAt, -1);
+    assert.deepEqual(after, [
+      ...before.slice(0, periodAt),
+      "As of: 2026-06-30",
+      ...before.slice(periodAt + 1),
+    ]);
+  });
+});

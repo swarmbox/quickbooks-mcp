@@ -45,28 +45,39 @@ export type ReportMethod =
   | "reportVendorBalanceDetail"
   | "reportVendorExpenses";
 
+/**
+ * How QBO reads the as-of date of a point-in-time report.
+ *
+ * - `"report_date"`: dated by `report_date` alone.
+ * - `"report_date_and_range"`: dated by `report_date` on an average-cost
+ *   company but by `start_date`/`end_date` on a FIFO one, and QBO answers as of
+ *   today when it reads the parameter it was not sent. All three are sent, with
+ *   the period starting at the beginning of books so `end_date` decides the date.
+ */
+export type PointInTimeDating = "report_date" | "report_date_and_range";
+
 export interface ReportSpec {
   method: ReportMethod;
   label: string;
-  /** Dated by a single point in time (`report_date`) rather than a range. */
-  pointInTime?: boolean;
+  /** Dated by a single point in time rather than a range; says how QBO reads that date. */
+  pointInTime?: PointInTimeDating;
 }
 
 export const REPORT_CATALOG: Record<string, ReportSpec> = {
-  aged_payables: { method: "reportAgedPayables", label: "Aged Payables", pointInTime: true },
-  aged_payable_detail: { method: "reportAgedPayableDetail", label: "Aged Payable Detail", pointInTime: true },
-  aged_receivables: { method: "reportAgedReceivables", label: "Aged Receivables", pointInTime: true },
-  aged_receivable_detail: { method: "reportAgedReceivableDetail", label: "Aged Receivable Detail", pointInTime: true },
+  aged_payables: { method: "reportAgedPayables", label: "Aged Payables", pointInTime: "report_date" },
+  aged_payable_detail: { method: "reportAgedPayableDetail", label: "Aged Payable Detail", pointInTime: "report_date" },
+  aged_receivables: { method: "reportAgedReceivables", label: "Aged Receivables", pointInTime: "report_date" },
+  aged_receivable_detail: { method: "reportAgedReceivableDetail", label: "Aged Receivable Detail", pointInTime: "report_date" },
   account_list: { method: "reportAccountListDetail", label: "Account List" },
   cash_flow: { method: "reportCashFlow", label: "Statement of Cash Flows" },
   class_sales: { method: "reportClassSales", label: "Sales by Class" },
-  customer_balance: { method: "reportCustomerBalance", label: "Customer Balance Summary", pointInTime: true },
-  customer_balance_detail: { method: "reportCustomerBalanceDetail", label: "Customer Balance Detail", pointInTime: true },
+  customer_balance: { method: "reportCustomerBalance", label: "Customer Balance Summary", pointInTime: "report_date" },
+  customer_balance_detail: { method: "reportCustomerBalanceDetail", label: "Customer Balance Detail", pointInTime: "report_date" },
   customer_income: { method: "reportCustomerIncome", label: "Income by Customer Summary" },
   customer_sales: { method: "reportCustomerSales", label: "Sales by Customer Summary" },
   department_sales: { method: "reportDepartmentSales", label: "Sales by Department" },
   general_ledger: { method: "reportGeneralLedgerDetail", label: "General Ledger" },
-  inventory_valuation_summary: { method: "reportInventoryValuationSummary", label: "Inventory Valuation Summary", pointInTime: true },
+  inventory_valuation_summary: { method: "reportInventoryValuationSummary", label: "Inventory Valuation Summary", pointInTime: "report_date_and_range" },
   item_sales: { method: "reportItemSales", label: "Sales by Product/Service" },
   journal: { method: "reportJournalReport", label: "Journal" },
   profit_and_loss_detail: { method: "reportProfitAndLossDetail", label: "Profit and Loss Detail" },
@@ -74,8 +85,8 @@ export const REPORT_CATALOG: Record<string, ReportSpec> = {
   transaction_list_by_customer: { method: "reportTransactionListByCustomer", label: "Transaction List by Customer" },
   transaction_list_by_vendor: { method: "reportTransactionListByVendor", label: "Transaction List by Vendor" },
   transaction_list_with_splits: { method: "reportTransactionListWithSplits", label: "Transaction List with Splits" },
-  vendor_balance: { method: "reportVendorBalance", label: "Vendor Balance Summary", pointInTime: true },
-  vendor_balance_detail: { method: "reportVendorBalanceDetail", label: "Vendor Balance Detail", pointInTime: true },
+  vendor_balance: { method: "reportVendorBalance", label: "Vendor Balance Summary", pointInTime: "report_date" },
+  vendor_balance_detail: { method: "reportVendorBalanceDetail", label: "Vendor Balance Detail", pointInTime: "report_date" },
   vendor_expenses: { method: "reportVendorExpenses", label: "Expenses by Vendor Summary" },
 };
 

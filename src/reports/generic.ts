@@ -65,6 +65,12 @@ export interface GenericReportOptions {
    * current mode is the dead end a cap is supposed to avoid.
    */
   overflowHint?: string;
+  /**
+   * Replaces the `Period:`/`As of:` line and nothing else. A point-in-time
+   * report can carry a range-shaped header (StartPeriod at the beginning of
+   * books), which would otherwise print as a period it does not cover.
+   */
+  asOfLine?: string;
 }
 
 interface TableRow {
@@ -230,12 +236,15 @@ export function renderGenericReport(
     detail = "summary",
     maxRows = DEFAULT_MAX_ROWS,
     overflowHint = "Raise max_rows or narrow the date range.",
+    asOfLine,
   } = options;
   const header = report.Header ?? {};
   const lines: string[] = [];
 
   lines.push(header.ReportName || label || "Report");
-  if (header.StartPeriod && header.EndPeriod) {
+  if (asOfLine) {
+    lines.push(asOfLine);
+  } else if (header.StartPeriod && header.EndPeriod) {
     lines.push(`Period: ${header.StartPeriod} to ${header.EndPeriod}`);
   } else if (header.EndPeriod) {
     lines.push(`As of: ${header.EndPeriod}`);

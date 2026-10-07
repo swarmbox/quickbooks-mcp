@@ -128,7 +128,7 @@ export const toolDefinitions = [
       properties: {
         as_of_date: {
           type: "string",
-          description: "Report as of this date in YYYY-MM-DD format (defaults to today)",
+          description: "Report as of this date in YYYY-MM-DD format (defaults to today). The response's As of line is the date QuickBooks applied; a report dated otherwise is refused.",
         },
         summarize_by: {
           type: "string",
@@ -181,7 +181,7 @@ export const toolDefinitions = [
         },
         report_date: {
           type: "string",
-          description: "YYYY-MM-DD as-of date for the aging, balance and inventory reports; rejected on the rest.",
+          description: "YYYY-MM-DD as-of date for the aging, balance and inventory reports; rejected on the rest. The response's As of line is the date QuickBooks applied; a report dated otherwise is refused.",
         },
         date_macro: {
           type: "string",

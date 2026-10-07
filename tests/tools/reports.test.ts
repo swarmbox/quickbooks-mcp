@@ -2,7 +2,7 @@ import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 import type QuickBooks from "node-quickbooks";
 
-import { handleGetTrialBalance } from "../../src/tools/handlers/reports.js";
+import { handleGetBalanceSheet, handleGetTrialBalance } from "../../src/tools/handlers/reports.js";
 import { setOutputMode } from "../../src/utils/output.js";
 import { clearLookupCache } from "../../src/client/cache.js";
 
@@ -66,5 +66,70 @@ describe("handleGetTrialBalance", () => {
     });
     assert.match(result.content[0].text, /1010 Checking/);
     assert.match(result.content[0].text, /FLAGS unavailable: .*429 throttled/);
+  });
+});
+
+// A balance sheet fake that records the criteria it receives. `header` builds
+// the Header from those criteria, so a test can echo the requested end_date or
+// ignore it.
+function balanceSheetClient(
+  header: (options: Record<string, string>) => Record<string, string>
+): { client: QuickBooks; calls: Array<Record<string, string>> } {
+  const calls: Array<Record<string, string>> = [];
+  const client = {
+    reportBalanceSheet: (options: Record<string, string>, cb: Callback<unknown>) => {
+      calls.push(options);
+      cb(null, {
+        Header: { ReportName: "BalanceSheet", ...header(options) },
+        Columns: { Column: [{ ColTitle: "" }, { ColTitle: "Total" }] },
+        Rows: {
+          Row: [{ type: "Data", ColData: [{ value: "1010 Checking" }, { value: "100.00" }] }],
+        },
+      });
+    },
+  } as unknown as QuickBooks;
+  return { client, calls };
+}
+
+describe("handleGetBalanceSheet", () => {
+  it("balance-sheet-states-as-of — dated call", async () => {
+    const { client, calls } = balanceSheetClient(o => ({
+      StartPeriod: "1970-01-01",
+      EndPeriod: o.end_date,
+    }));
+    const result = await handleGetBalanceSheet(client, { as_of_date: "2026-06-30" });
+    assert.deepEqual(calls, [{ start_date: "1970-01-01", end_date: "2026-06-30" }]);
+    const lines = result.content[0].text.split("\n");
+    assert.ok(lines.includes("As of: 2026-06-30"));
+    assert.equal(lines.filter(l => l.startsWith("Period:")).length, 0);
+  });
+
+  it("balance-sheet-states-as-of — undated call", async () => {
+    const { client, calls } = balanceSheetClient(() => ({
+      StartPeriod: "2026-01-01",
+      EndPeriod: "2026-10-07",
+    }));
+    const result = await handleGetBalanceSheet(client, {});
+    assert.deepEqual(calls, [{}]);
+    const lines = result.content[0].text.split("\n");
+    assert.ok(lines.includes("Period: 2026-01-01 to 2026-10-07"));
+    assert.equal(lines.filter(l => l.startsWith("As of:")).length, 0);
+  });
+
+  it("balance-sheet-refuses-misdated", async () => {
+    const { client } = balanceSheetClient(() => ({ EndPeriod: "2026-10-07" }));
+    await assert.rejects(
+      handleGetBalanceSheet(client, { as_of_date: "2026-06-30" }),
+      (err: Error) => err.message.includes("2026-06-30") && err.message.includes("2026-10-07")
+    );
+  });
+
+  it("balance-sheet-refuses-non-iso-as-of", async () => {
+    const { client, calls } = balanceSheetClient(() => ({ EndPeriod: "2026-06-30" }));
+    await assert.rejects(
+      handleGetBalanceSheet(client, { as_of_date: "2026-6-30" }),
+      (err: Error) => err.message.includes("YYYY-MM-DD")
+    );
+    assert.equal(calls.length, 0);
   });
 });

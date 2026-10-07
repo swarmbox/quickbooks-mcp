@@ -10,10 +10,15 @@ import {
 } from "../../client/index.js";
 import { isHttpMode, outputReport } from "../../utils/index.js";
 import {
+  BEGINNING_OF_BOOKS,
   DEFAULT_MAX_ROWS,
   REPORT_CATALOG,
   REPORT_NAMES,
+  appliedAsOf,
+  assertAppliedAsOf,
   dedicatedToolFor,
+  describeAsOf,
+  isIsoDate,
   renderGenericReport,
   resolveReportName,
 } from "../../reports/index.js";
@@ -93,10 +98,15 @@ export async function handleGetReport(
 
   const spec = REPORT_CATALOG[key];
   const options: Record<string, string> = {};
+  // The date a point-in-time report was asked for; undefined on a range report
+  // and when a point-in-time report was given none.
+  let asOf: string | undefined;
 
-  // A point-in-time report is dated by report_date; QBO ignores a range on it.
-  // Accept end_date as report_date there so a caller who reaches for the range
-  // parameter is not silently answered as of today.
+  // A point-in-time report is dated by a single as-of date, but the parameter
+  // QBO reads for it depends on the report and, for inventory valuation, on the
+  // company's costing method (see PointInTimeDating). Accept end_date as the
+  // as-of date there so a caller who reaches for the range parameter is not
+  // silently answered as of today.
   if (spec.pointInTime) {
     // QBO does not merely ignore a range on these reports — it answers as of
     // today, so a caller asking for a March aging silently gets August's. Taking
@@ -107,8 +117,22 @@ export async function handleGetReport(
         `Report "${key}" is dated at a single point in time — pass report_date, not start_date.`
       );
     }
-    const asOf = report_date ?? end_date;
-    if (asOf) options.report_date = criterion("report_date", asOf);
+    const requested = report_date ?? end_date;
+    if (requested) {
+      // criterion first, so unsafe characters keep their own message; the ISO
+      // check then rejects a date QBO could read differently from the caller.
+      asOf = criterion("report_date", requested);
+      if (!isIsoDate(asOf)) {
+        throw new Error(`Invalid report date "${asOf}" — expected YYYY-MM-DD.`);
+      }
+      options.report_date = asOf;
+      if (spec.pointInTime === "report_date_and_range") {
+        // A caller's start_date is never sent: it would move the period's start
+        // and, on a FIFO company, the date QBO answers for.
+        options.start_date = BEGINNING_OF_BOOKS;
+        options.end_date = options.report_date;
+      }
+    }
   } else {
     if (report_date) {
       throw new Error(
@@ -153,8 +177,23 @@ export async function handleGetReport(
     promisify<unknown>((cb) => client[spec.method](options, cb))
   )) as QBReport;
 
+  // Only a point-in-time report has an as-of date to check; a range report's
+  // header states the period it covered, which is not compared with anything.
+  //
+  // A stated date that differs from the request is refused, because QBO answers
+  // a request it cannot honour as of today and the figures would be mistaken for
+  // the requested date's. A date QBO did not state is not evidence of a mismatch,
+  // so it is only reported in the "As of:" line, where the reader can see it.
+  let asOfLine: string | undefined;
+  if (spec.pointInTime) {
+    const applied = appliedAsOf(result.Header);
+    assertAppliedAsOf(key, asOf, applied);
+    asOfLine = describeAsOf(applied, asOf);
+  }
+
   const summary = renderGenericReport(result, {
     label: spec.label,
+    asOfLine,
     detail: detail,
     maxRows,
     // stdio writes the whole payload to the file named beneath the summary, so
