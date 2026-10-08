@@ -207,7 +207,9 @@ describe("write call sites", () => {
     // into being retried, and nothing else in the suite would notice — so the
     // convention is asserted against the source itself.
     const handlerDir = path.join(repoRoot(), "src", "tools", "handlers");
-    const writeCall = /client\.(?:create|update)[A-Za-z]+\(|config\.deleteMethod/;
+    // `config.deleteMethod` covers the direct delete calls; the create/update/delete
+    // alternation covers the named client methods.
+    const writeCall = /client\.(?:create|update|delete)[A-Za-z]+\(|config\.deleteMethod/;
     const unguarded: string[] = [];
 
     for (const file of readdirSync(handlerDir).filter((f) => f.endsWith(".ts"))) {
