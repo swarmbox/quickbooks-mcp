@@ -5,7 +5,8 @@
 // chart and round amounts.
 //
 // The fake records every method call by name, so a test can assert both what
-// was read and what was never read. A missing id rejects, as QBO does.
+// was read and what was never read. A missing id rejects, as QBO does. Writes
+// are also logged with their bodies, in call order, in `writes`.
 
 import type QuickBooks from "node-quickbooks";
 
@@ -212,11 +213,16 @@ export const STORED_BILL_PAYMENTS: Record<string, Record<string, unknown>> = {
 
 type Records = Record<string, Record<string, unknown>>;
 
+/** The write methods the fake implements; each call is logged in `writes`, even one made to reject. */
+const WRITE_METHODS = new Set(["createBillPayment", "updateAttachable", "deletePurchase", "updateBillPayment"]);
+
 export interface FakeClientOptions {
   /** Replaces the default findBillPayments page: returns the BillPayment rows for one page. */
   findBillPayments?: (criteria: string) => Array<Record<string, unknown>>;
   /** Replaces the default createBillPayment echo: returns the BillPayment QBO would book for the payload. */
   createBillPayment?: (payload: Record<string, unknown>) => Record<string, unknown>;
+  /** Replaces the default updateBillPayment echo: returns the BillPayment QBO would return for the body. */
+  updateBillPayment?: (body: Record<string, unknown>) => Record<string, unknown>;
   /** Extra or replacement records, keyed by entity then id. */
   records?: Partial<Record<"Bill" | "VendorCredit" | "JournalEntry" | "Deposit" | "Purchase" | "BillPayment", Records>>;
   /** Delay every get* read so concurrency can be observed. */
@@ -231,8 +237,9 @@ export interface FakeClientOptions {
    */
   attachables?: Array<Record<string, unknown>>;
   /**
-   * Methods to make reject, by name. With `id`, only a call whose first argument is
-   * that id (or an object with that `Id`) rejects. The call is still recorded.
+   * Methods to make reject, by name, reads and writes alike. With `id`, only a call
+   * whose first argument is that id (or a body with that `Id`) rejects. The call is
+   * still recorded, and a rejected write is still logged in `writes`.
    */
   fail?: Record<string, { error: unknown; id?: string }>;
 }
@@ -245,6 +252,8 @@ export interface FakeClient {
   billPaymentQueries: string[];
   /** Each payload passed to createBillPayment. */
   sent: Array<Record<string, unknown>>;
+  /** Every write call (create, update or delete) with its body, in call order. */
+  writes: Array<{ method: string; body: Record<string, unknown> }>;
   /** How many times a method was called. */
   callsTo(name: string): number;
   /** The most get* reads that were ever in flight at once. */
@@ -255,6 +264,7 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
   const calls: string[] = [];
   const billPaymentQueries: string[] = [];
   const sent: Array<Record<string, unknown>> = [];
+  const writes: Array<{ method: string; body: Record<string, unknown> }> = [];
   let inFlight = 0;
   let peak = 0;
 
@@ -338,10 +348,30 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
         cb(error, undefined);
       }
     },
+    // The created record is stored, so getBillPayment of its id returns it.
     createBillPayment: (payload: Record<string, unknown>, cb: Callback<unknown>) => {
       calls.push("createBillPayment");
       sent.push(payload);
-      cb(null, options.createBillPayment?.(payload) ?? { ...structuredClone(payload), Id: "950", SyncToken: "0" });
+      writes.push({ method: "createBillPayment", body: structuredClone(payload) });
+      const created = options.createBillPayment?.(payload) ?? { ...structuredClone(payload), Id: "950", SyncToken: "0" };
+      tables.BillPayment[String(created.Id)] = structuredClone(created);
+      cb(null, created);
+    },
+    // Echoes the body with its SyncToken incremented, as QBO does on a full update.
+    updateAttachable: (body: Record<string, unknown>, cb: Callback<unknown>) => {
+      calls.push("updateAttachable");
+      writes.push({ method: "updateAttachable", body: structuredClone(body) });
+      cb(null, { ...structuredClone(body), SyncToken: String(Number(body.SyncToken ?? "0") + 1) });
+    },
+    deletePurchase: (body: Record<string, unknown>, cb: Callback<unknown>) => {
+      calls.push("deletePurchase");
+      writes.push({ method: "deletePurchase", body: structuredClone(body) });
+      cb(null, { Purchase: { Id: body.Id, status: "Deleted" } });
+    },
+    updateBillPayment: (body: Record<string, unknown>, cb: Callback<unknown>) => {
+      calls.push("updateBillPayment");
+      writes.push({ method: "updateBillPayment", body: structuredClone(body) });
+      cb(null, options.updateBillPayment?.(body) ?? { ...structuredClone(body), SyncToken: "1" });
     },
     findAttachables: (criteria: unknown, cb: Callback<unknown>) => {
       calls.push("findAttachables");
@@ -360,6 +390,7 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
       const subject = typeof first === "object" ? first?.Id : first;
       if (id === undefined || String(subject) === id) {
         calls.push(name);
+        if (WRITE_METHODS.has(name)) writes.push({ method: name, body: structuredClone(first as Record<string, unknown>) });
         cb(error, undefined);
       } else if (original) {
         original(...args);
@@ -375,6 +406,7 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
     calls,
     billPaymentQueries,
     sent,
+    writes,
     callsTo: (name) => calls.filter((c) => c === name).length,
     maxInFlight: () => peak,
   };

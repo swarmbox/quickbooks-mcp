@@ -1,15 +1,19 @@
-// convert_expense_to_bill_payment: planning and the draft preview. Invented
-// fixtures only; nothing here calls QuickBooks. No write is ever expected in
-// this half of the tool, in draft or in commit.
+// convert_expense_to_bill_payment: planning, the draft preview and the commit
+// sequence. Invented fixtures only; nothing here calls QuickBooks. A draft or a
+// refusal never writes; a commit writes create → move attachments → delete →
+// set ref no., and stops at the first failure without undoing anything.
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { handleConvertExpenseToBillPayment } from "../../src/tools/handlers/convert-expense.js";
 import { clearLookupCache } from "../../src/client/cache.js";
+import { buildQboUrl } from "../../src/utils/urls.js";
 import { rejectionOf, NORTH, type FakeClient } from "./bill-payment-fixtures.js";
 import {
   ATTACHMENT_FILE,
+  ATTACHMENT_NOTE,
+  qboFault,
   PRODUCE_CLASS,
   accountLine,
   convertClient,
@@ -268,7 +272,7 @@ describe("convert_expense_to_bill_payment — memo rule", () => {
 });
 
 describe("convert_expense_to_bill_payment — not carried over", () => {
-  it("convert-not-carried-lists-fields — class, customer, custom fields and the remit-to address are listed with their values", async () => {
+  it("convert-not-carried-lists-fields — class, customer, custom fields, the remit-to address and the payment method are listed with their values", async () => {
     // The customer and billable status sit on the line detail; custom fields and
     // the remit-to address sit on the expense header, as QuickBooks stores them.
     const text = await previewOf(
@@ -288,6 +292,7 @@ describe("convert_expense_to_bill_payment — not carried over", () => {
           { Name: "Empty", StringValue: "" },
         ],
         RemitToAddr: { Line1: "1 Main St", City: "Northville", CountrySubDivisionCode: "CA", PostalCode: "90000" },
+        PaymentMethodRef: { value: "2", name: "Check" },
       }),
       { expense_id: "760", bills: BILL_110 },
     );
@@ -297,6 +302,7 @@ describe("convert_expense_to_bill_payment — not carried over", () => {
       "Line customer: North Cafe (NotBillable)",
       "Custom field Crew: A",
       "Remit-to address: 1 Main St, Northville, CA, 90000",
+      "Payment method: Check",
       "The bill payment gets a new transaction id and create time.",
     ]);
   });
@@ -581,5 +587,402 @@ describe("convert_expense_to_bill_payment — arguments", () => {
       );
       assert.deepEqual(fake.calls, []);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Commit (draft: false)
+// ---------------------------------------------------------------------------
+
+const BP_URL = buildQboUrl("billpayment", "txnId", "950");
+const DELETE_BILL_PAYMENT = 'delete_entity (entity_type "bill_payment", id "950", confirm true)';
+const DELETE_EXPENSE_750 = 'delete_entity (entity_type "expense", id "750", confirm true)';
+
+/** Run the handler with draft false on `fake`. */
+async function commitOn(fake: FakeClient, args: Omit<Args, "draft">): Promise<Result> {
+  return (await handleConvertExpenseToBillPayment(fake.client, { ...args, draft: false })) as Result;
+}
+
+/** The write methods the fake saw, in order (a rejected write included). */
+const writeOrder = (fake: FakeClient): string[] => fake.writes.map((w) => w.method);
+
+/** A create response: the payload echoed as Id 950, with `change` applied to it. */
+const bookedAs =
+  (change: (booked: Record<string, unknown>) => void) =>
+  (payload: Record<string, unknown>): Record<string, unknown> => {
+    const booked: Record<string, unknown> = { ...structuredClone(payload), Id: "950", SyncToken: "0" };
+    change(booked);
+    return booked;
+  };
+
+/**
+ * Every stop report: isError, the heading with its reason, never "Converted",
+ * and the closing "Do not re-run" line followed by the bill payment link.
+ */
+function assertStopReport(result: Result, reason: string): string {
+  const text = textOf(result);
+  const lines = text.trimEnd().split("\n");
+  assert.equal(result.isError, true, text);
+  assert.equal(lines[0], `Expense Conversion Stopped — ${reason}`, text);
+  assert.ok(!text.includes("Converted"), text);
+  assert.equal(lines.at(-2), "Do not re-run this conversion.", text);
+  assert.equal(lines.at(-1), `View in QuickBooks: ${BP_URL}`, text);
+  return text;
+}
+
+function assertIncludes(text: string, fragments: string[]): void {
+  for (const fragment of fragments) assert.ok(text.includes(fragment), `expected "${fragment}" in:\n${text}`);
+}
+
+describe("convert_expense_to_bill_payment — commit", () => {
+  it("convert-commit-check-payload — a Check expense sends exactly the previewed Check bill payment", async () => {
+    const fake = convertClient({ attachments: [ATTACHMENT_FILE] });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(fake.sent[0], {
+      VendorRef: { value: "5", name: "North Produce" },
+      TxnDate: "2026-07-15",
+      TotalAmt: 250,
+      PayType: "Check",
+      CheckPayment: { BankAccountRef: { value: "10", name: "1010 Checking" }, PrintStatus: "NotSet" },
+      PrivateNote: "Paid by check — July produce",
+      DepartmentRef: { value: "1", name: "North" },
+      Line: [{ Amount: 250, LinkedTxn: [{ TxnId: "110", TxnType: "Bill" }] }],
+    });
+  });
+
+  it("convert-commit-cash-payload — a Cash expense sends a bare Check payment and sets no ref no.", async () => {
+    const fake = convertClient();
+    const result = await commitOn(fake, { expense_id: "751", bills: BILL_111 });
+    const text = textOf(result);
+
+    assert.equal(result.isError, undefined, text);
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(fake.sent[0], {
+      VendorRef: { value: "5", name: "North Produce" },
+      TxnDate: "2026-07-16",
+      TotalAmt: 100,
+      PayType: "Check",
+      CheckPayment: { BankAccountRef: { value: "10", name: "1010 Checking" } },
+      Line: [{ Amount: 100, LinkedTxn: [{ TxnId: "111", TxnType: "Bill" }] }],
+    });
+    assert.equal(fake.callsTo("updateBillPayment"), 0);
+    // The fresh-SyncToken read exists only for the ref no. update.
+    assert.equal(fake.callsTo("getBillPayment"), 0);
+    assert.deepEqual(writeOrder(fake), ["createBillPayment", "deletePurchase"]);
+    assert.ok(hasLine(text, "Ref no.: (none)"), text);
+  });
+
+  it("convert-commit-card-payload — a CreditCard expense sends a Credit Card payment on its card account", async () => {
+    const fake = convertClient();
+    const result = await commitOn(fake, { expense_id: "752", bills: BILL_111 });
+    const text = textOf(result);
+
+    assert.equal(result.isError, undefined, text);
+    assert.equal(fake.sent.length, 1);
+    assert.deepEqual(fake.sent[0], {
+      VendorRef: { value: "5", name: "North Produce" },
+      TxnDate: "2026-07-17",
+      TotalAmt: 100,
+      PayType: "CreditCard",
+      CreditCardPayment: { CCAccountRef: { value: "30", name: "2100 Company Card" } },
+      PrivateNote: "Card payment",
+      Line: [{ Amount: 100, LinkedTxn: [{ TxnId: "111", TxnType: "Bill" }] }],
+    });
+    assert.equal(text.split("\n")[0], "Expense Converted to Bill Payment (Credit Card)");
+  });
+
+  it("convert-commit-call-order — create, move each attachment, delete, then set the ref no. on a fresh SyncToken", async () => {
+    const fake = convertClient({ attachments: [ATTACHMENT_FILE, ATTACHMENT_NOTE] });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    assert.equal(result.isError, undefined, textOf(result));
+
+    assert.deepEqual(writeOrder(fake), [
+      "createBillPayment",
+      "updateAttachable",
+      "updateAttachable",
+      "deletePurchase",
+      "updateBillPayment",
+    ]);
+
+    const bodyOf = (method: string) => fake.writes.filter((w) => w.method === method).map((w) => w.body);
+    assert.deepEqual(bodyOf("deletePurchase"), [{ Id: "750", SyncToken: "2" }]);
+
+    const deleteAt = fake.calls.indexOf("deletePurchase");
+    const updateAt = fake.calls.indexOf("updateBillPayment");
+    assert.ok(
+      fake.calls.slice(deleteAt + 1, updateAt).includes("getBillPayment"),
+      `expected a getBillPayment read between deletePurchase and updateBillPayment: ${fake.calls.join(", ")}`,
+    );
+    assert.deepEqual(bodyOf("updateBillPayment"), [
+      {
+        Id: "950",
+        SyncToken: "0",
+        sparse: true,
+        VendorRef: { value: "5", name: "North Produce" },
+        PayType: "Check",
+        DocNumber: "1042",
+      },
+    ]);
+
+    const moved = JSON.parse(JSON.stringify(bodyOf("updateAttachable"))) as Array<Record<string, unknown>>;
+    assert.deepEqual(moved.map((a) => a.Id), ["9001", "9002"]);
+    assert.deepEqual(moved[0].AttachableRef, [
+      { EntityRef: { type: "BillPayment", value: "950" } },
+      { EntityRef: { type: "Vendor", value: "5" } },
+    ]);
+    assert.deepEqual(moved[1].AttachableRef, [{ EntityRef: { type: "BillPayment", value: "950" } }]);
+  });
+
+  it("the ref no. update carries the SyncToken read just before it, not the one create returned", async () => {
+    // Moving an attachment may bump the bill payment's SyncToken: stand in for
+    // that with a read that returns a token newer than create's "0".
+    const fake = convertClient({ attachments: [ATTACHMENT_FILE] });
+    const client = fake.client as unknown as Record<string, unknown>;
+    const read = client.getBillPayment as (id: string, cb: (err: unknown, record: unknown) => void) => void;
+    client.getBillPayment = (id: string, cb: (err: unknown, record: unknown) => void) =>
+      read(id, (err, record) => cb(err, err ? record : { ...(record as object), SyncToken: "3" }));
+
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    assert.equal(result.isError, undefined, textOf(result));
+    const update = fake.writes.find((w) => w.method === "updateBillPayment");
+    assert.equal(update?.body.SyncToken, "3");
+  });
+
+  it("convert-commit-success-text — the result names both ids, the booked header, the ref no. and the moved attachments", async () => {
+    const fake = convertClient({ attachments: [ATTACHMENT_FILE, ATTACHMENT_NOTE] });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = textOf(result);
+    const lines = text.trimEnd().split("\n");
+
+    assert.equal(result.isError, undefined, text);
+    assert.equal(lines[0], "Expense Converted to Bill Payment (Check)");
+    assert.ok(hasLine(text, "Bill payment 950 created; expense 750 deleted."), text);
+    assert.ok(hasLine(text, "Ref no.: 1042"), text);
+    assert.ok(hasLine(text, "Attachments moved: 2"), text);
+    assert.ok(lines.at(-1)!.startsWith("View in QuickBooks: "), text);
+    assert.equal(lines.at(-1), `View in QuickBooks: ${BP_URL}`);
+    assert.equal(
+      blockAfter(text, "Applied:")[0],
+      "Bill 110 (#B-10, 2026-07-01) — charge: open $250.00, applying $250.00, remaining $0.00",
+    );
+    assertIncludes(text, ["North Produce", "1010 Checking", "2026-07-15", "Paid by check — July produce", "North"]);
+    assert.ok(!text.includes("Stopped"), text);
+  });
+
+  it("the booked header lines are read from the create response, not the payload", async () => {
+    // A memo QBO booked differently would stop the run, so use a field the
+    // check does not compare: a location name, where only the id is compared.
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => {
+        b.DepartmentRef = { value: "1", name: "North Booked" };
+      }),
+    });
+    const text = textOf(await commitOn(fake, { expense_id: "750", bills: BILL_110 }));
+    assert.ok(text.includes("North Booked"), text);
+  });
+
+  it("the draft=false placeholder is gone", async () => {
+    const fake = convertClient();
+    const text = textOf(await commitOn(fake, { expense_id: "750", bills: BILL_110 }));
+    assert.ok(!text.includes("not implemented"), text);
+  });
+});
+
+describe("convert_expense_to_bill_payment — verify the created bill payment", () => {
+  it("convert-stop-lines-mismatch — a booked line that differs from the one sent stops before any other write", async () => {
+    const fake = convertClient({
+      attachments: [ATTACHMENT_FILE],
+      createBillPayment: bookedAs((b) => {
+        b.Line = [{ Amount: 250, LinkedTxn: [{ TxnId: "111", TxnType: "Bill" }] }];
+      }),
+    });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "BILL PAYMENT NOT AS PREVIEWED");
+
+    assertIncludes(text, [
+      "Bill 110: sent $250.00, not booked",
+      "counted twice",
+      DELETE_BILL_PAYMENT,
+      DELETE_EXPENSE_750,
+      "Do not re-run this conversion.",
+    ]);
+    assert.equal(fake.calls.at(-1), "createBillPayment");
+    assert.deepEqual(writeOrder(fake), ["createBillPayment"]);
+  });
+
+  it("convert-stop-header-mismatch — a dropped location stops before any other write", async () => {
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => {
+        delete b.DepartmentRef;
+      }),
+    });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "BILL PAYMENT NOT AS PREVIEWED");
+
+    assertIncludes(text, ['Location: sent "1", booked "(none)"', "counted twice", DELETE_BILL_PAYMENT, DELETE_EXPENSE_750]);
+    assert.equal(fake.calls.at(-1), "createBillPayment");
+  });
+
+  it("every compared header field is reported in order, as sent then booked", async () => {
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => {
+        b.VendorRef = { value: "6", name: "South Dairy" };
+        b.TxnDate = "2026-07-16";
+        b.CheckPayment = { BankAccountRef: { value: "11" }, PrintStatus: "NeedToPrint" };
+        b.PrivateNote = "Other memo";
+        b.DepartmentRef = { value: "2" };
+      }),
+    });
+    const text = assertStopReport(await commitOn(fake, { expense_id: "750", bills: BILL_110 }), "BILL PAYMENT NOT AS PREVIEWED");
+
+    const expected = [
+      'Vendor: sent "5", booked "6"',
+      'Date: sent "2026-07-15", booked "2026-07-16"',
+      'Payment account: sent "10", booked "11"',
+      'Memo: sent "Paid by check — July produce", booked "Other memo"',
+      'Location: sent "1", booked "2"',
+      'Print status: sent "NotSet", booked "NeedToPrint"',
+    ];
+    const trimmed = text.split("\n").map((l) => l.trim());
+    const at = expected.map((line) => trimmed.indexOf(line));
+    for (const [i, index] of at.entries()) assert.ok(index >= 0, `expected "${expected[i]}" in:\n${text}`);
+    assert.deepEqual([...at].sort((a, b) => a - b), at, `header differences out of order:\n${text}`);
+    assert.equal(fake.calls.at(-1), "createBillPayment");
+  });
+
+  it("a booked pay type that differs from the one sent stops the run", async () => {
+    const fake = convertClient({ createBillPayment: bookedAs((b) => (b.PayType = "CreditCard")) });
+    const text = assertStopReport(await commitOn(fake, { expense_id: "750", bills: BILL_110 }), "BILL PAYMENT NOT AS PREVIEWED");
+    assertIncludes(text, ['Pay type: sent "Check", booked "CreditCard"']);
+    assert.equal(fake.calls.at(-1), "createBillPayment");
+  });
+
+  it("a card payment's account is compared on CCAccountRef", async () => {
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => (b.CreditCardPayment = { CCAccountRef: { value: "31" } })),
+    });
+    const text = assertStopReport(await commitOn(fake, { expense_id: "752", bills: BILL_111 }), "BILL PAYMENT NOT AS PREVIEWED");
+    assertIncludes(text, ['Payment account: sent "30", booked "31"']);
+  });
+
+  it("an absent memo equals an empty one, and a location or print status not sent is not compared", async () => {
+    // Expense 751 sends no memo, location or print status.
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => {
+        b.PrivateNote = "";
+        b.DepartmentRef = { value: "2" };
+        b.CheckPayment = { ...(b.CheckPayment as Record<string, unknown>), PrintStatus: "NotSet" };
+      }),
+    });
+    const result = await commitOn(fake, { expense_id: "751", bills: BILL_111 });
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.deepEqual(writeOrder(fake), ["createBillPayment", "deletePurchase"]);
+  });
+
+  it("the mismatch report lists header differences, then line differences, then what QuickBooks booked", async () => {
+    const fake = convertClient({
+      createBillPayment: bookedAs((b) => {
+        delete b.DepartmentRef;
+        b.Line = [{ Amount: 250, LinkedTxn: [{ TxnId: "111", TxnType: "Bill" }] }];
+      }),
+    });
+    const text = assertStopReport(await commitOn(fake, { expense_id: "750", bills: BILL_110 }), "BILL PAYMENT NOT AS PREVIEWED");
+
+    const header = text.indexOf('Location: sent "1", booked "(none)"');
+    const line = text.indexOf("Bill 110: sent $250.00, not booked");
+    const booked = text.indexOf("Booked by QuickBooks:");
+    assert.ok(header >= 0 && line > header && booked > line, text);
+    assert.deepEqual(blockAfter(text, "Booked by QuickBooks:"), ["Bill 111: $250.00 (not sent)", "Total: $250.00"]);
+  });
+});
+
+describe("convert_expense_to_bill_payment — stops after create", () => {
+  it("convert-stop-attachment-failure — a failed attachment move stops before the delete and says how to re-link", async () => {
+    const fake = convertClient({
+      attachments: [ATTACHMENT_FILE, ATTACHMENT_NOTE],
+      fail: { updateAttachable: { error: qboFault("2500", "Invalid Reference Id"), id: "9002" } },
+    });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "ATTACHMENTS NOT MOVED");
+
+    assertIncludes(text, ["[2500]", "counted twice", DELETE_EXPENSE_750, DELETE_BILL_PAYMENT, "Do not re-run this conversion."]);
+    // The moved and the unmoved attachment are both named, with the tool that re-links them.
+    assertIncludes(text, ["9001", "9002", "edit_attachment"]);
+    assert.equal(fake.callsTo("deletePurchase"), 0);
+    assert.equal(fake.callsTo("updateBillPayment"), 0);
+    // Nothing is undone: the moved attachment is not moved back.
+    assert.deepEqual(writeOrder(fake), ["createBillPayment", "updateAttachable", "updateAttachable"]);
+  });
+
+  it("convert-stop-delete-failure — a failed delete stops before the ref no.", async () => {
+    const fake = convertClient({ fail: { deletePurchase: { error: qboFault("5010", "Stale Object Error") } } });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "EXPENSE NOT DELETED");
+
+    assertIncludes(text, ["[5010]", "counted twice", DELETE_EXPENSE_750, DELETE_BILL_PAYMENT, "Do not re-run this conversion."]);
+    assert.equal(fake.callsTo("updateBillPayment"), 0);
+    assert.deepEqual(writeOrder(fake), ["createBillPayment", "deletePurchase"]);
+  });
+
+  it("convert-stop-ref-no-failure — a failed ref no. update reports the conversion otherwise complete", async () => {
+    const fake = convertClient({
+      fail: { updateBillPayment: { error: qboFault("6140", "Duplicate Document Number Error") } },
+    });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "REF NO. NOT SET");
+
+    assertIncludes(text, ["[6140]", "set ref no. 1042 on bill payment 950 in QuickBooks", "otherwise complete", "Do not re-run this conversion."]);
+    assert.ok(!text.includes("counted twice"), text);
+    assert.deepEqual(writeOrder(fake), ["createBillPayment", "deletePurchase", "updateBillPayment"]);
+  });
+
+  it("convert-stop-ref-no-failure — a failed SyncToken read before the ref no. update is a ref-no. stop, not a throw", async () => {
+    const fake = convertClient({
+      fail: { getBillPayment: { error: qboFault("3200", "Authentication failed"), id: "950" } },
+    });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "REF NO. NOT SET");
+
+    assertIncludes(text, ["[3200]", "set ref no. 1042 on bill payment 950 in QuickBooks"]);
+    assert.ok(!text.includes("counted twice"), text);
+    assert.equal(fake.callsTo("updateBillPayment"), 0);
+  });
+
+  it("convert-stop-ref-no-mismatch — an update that returns a different ref no. is a ref-no. stop", async () => {
+    const fake = convertClient({ updateBillPayment: (body) => ({ ...body, SyncToken: "1", DocNumber: "999" }) });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = assertStopReport(result, "REF NO. NOT SET");
+
+    assertIncludes(text, ['QuickBooks returned ref no. "999"']);
+  });
+
+  it("convert-stop-create-error-propagates — a rejected create propagates unchanged and nothing else is written", async () => {
+    const fake = convertClient({ fail: { createBillPayment: { error: new Error("create refused") } } });
+    const message = await rejectionOf(() => commitOn(fake, { expense_id: "750", bills: BILL_110 }));
+
+    assert.equal(message, "create refused");
+    assert.equal(fake.calls.at(-1), "createBillPayment");
+    assert.deepEqual(writeOrder(fake), ["createBillPayment"]);
+  });
+
+  it("convert-stop-never-leaks-token — a failure carrying request config is reported without its credentials", async () => {
+    const leaky = {
+      config: { headers: { Authorization: "Bearer secret-token-123" } },
+      response: {
+        status: 400,
+        data: { Fault: { type: "ValidationFault", Error: [{ code: "6000", Message: "Business Validation Error" }] } },
+      },
+    };
+    const fake = convertClient({ fail: { deletePurchase: { error: leaky } } });
+    const result = await commitOn(fake, { expense_id: "750", bills: BILL_110 });
+    const text = textOf(result);
+
+    assert.equal(result.isError, true, text);
+    assert.ok(text.includes("[6000]"), text);
+    assert.ok(!text.includes("secret-token-123"), text);
+    assert.ok(!text.includes("Authorization"), text);
   });
 });

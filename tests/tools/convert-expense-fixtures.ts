@@ -133,3 +133,8 @@ export function convertClient(options: ConvertClientOptions = {}): FakeClient {
     },
   });
 }
+
+/** A QBO validation fault, as a rejected write carries it: `[code] message` once formatted. */
+export function qboFault(code: string, message: string): Record<string, unknown> {
+  return { Fault: { type: "ValidationFault", Error: [{ code, Message: message }] } };
+}
