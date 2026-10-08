@@ -14,13 +14,15 @@
 // expense. See "Converting an Expense to a Bill Payment" in
 // docs/quickbooks-api-limitations.md.
 //
-// This file holds the planning half: every read, every eligibility check, the
-// bill payment payload and the draft preview. `planConversion` returns
-// everything a commit needs, so draft and commit share one build and cannot
-// drift apart. It makes no write call of any kind.
+// Planning (`planConversion`) does every read, every eligibility check, and
+// builds the bill payment payload; it makes no write call of any kind. Draft
+// renders the plan. Commit (`commitConversion`) re-plans from fresh reads and
+// then runs the writes, so draft and commit share one build and cannot drift
+// apart. A commit stops at the first failure and undoes nothing: its report says
+// what was done, what was not, and the calls that finish or undo it.
 
 import QuickBooks from "node-quickbooks";
-import { fetchAttachments, describeAttachable, type Attachable } from "./attachment.js";
+import { fetchAttachments, describeAttachable, moveLinkBody, type Attachable } from "./attachment.js";
 import {
   appliedByLinkedTxn,
   collectLinkRequests,
@@ -29,11 +31,28 @@ import {
   type BillPaymentLine,
   type ResolvedLink,
 } from "./bill-payment-links.js";
-import { billPaymentLines, formatLinkLines } from "./bill-payment.js";
+import {
+  billPaymentLines,
+  bookedDifferences,
+  formatBookedLines,
+  formatLinkLines,
+  type CreatedBillPayment,
+} from "./bill-payment.js";
+import { buildDeleteBody } from "./delete.js";
 import type { Preferences } from "./preferences.js";
-import { getAccountCache, promisify } from "../../client/index.js";
-import { extractQboFault, formatDollars, sumCents, toCents, toDollars } from "../../utils/index.js";
+import { getAccountCache, promisify, promisifyWrite } from "../../client/index.js";
+import {
+  buildQboUrl,
+  extractQboFault,
+  formatDollars,
+  formatQboError,
+  sumCents,
+  toCents,
+  toDollars,
+} from "../../utils/index.js";
 import type { AccountCache, QBRef } from "../../types/index.js";
+
+type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
 
 /** QBO's `PrivateNote` limit, in characters. */
 const MEMO_LIMIT = 4000;
@@ -386,9 +405,18 @@ async function planConversion(
   };
 }
 
+/** The Applied block shared by the draft and the success result: each bill, then the total. */
+function appliedBlock(plan: ConversionPlan): string[] {
+  return [
+    "Applied:",
+    ...formatLinkLines(plan.links),
+    `  Payment total: $${formatDollars(plan.totalCents)} (equals the expense total)`,
+  ];
+}
+
 /** The draft preview: what will be deleted, what will be created, and the steps a commit will run. */
 function renderDraft(plan: ConversionPlan): string {
-  const { expense, expenseId, vendor, isCard, links, payload, docNumber, attachments } = plan;
+  const { expense, expenseId, vendor, isCard, payload, docNumber, attachments } = plan;
   const line = expense.Line![0];
   const description = (line.Description ?? "").trim();
   const label = isCard ? "Credit Card" : "Check";
@@ -425,9 +453,7 @@ function renderDraft(plan: ConversionPlan): string {
       ...(payload.CheckPayment?.PrintStatus ? [`Print status: ${payload.CheckPayment.PrintStatus}`] : []),
     ],
     "",
-    "Applied:",
-    ...formatLinkLines(links),
-    `  Payment total: $${formatDollars(plan.totalCents)} (equals the expense total)`,
+    ...appliedBlock(plan),
     "",
     attachments.length > 0
       ? ["Attachments moved to the bill payment: " + attachments.length, ...attachments.map((a) => `  ${describeAttachable(a)}`)].join("\n")
@@ -444,6 +470,289 @@ function renderDraft(plan: ConversionPlan): string {
   ].join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Commit
+// ---------------------------------------------------------------------------
+
+/** A value as a header difference shows it: quoted, with an absent or empty value as `(none)`. */
+const shown = (value: string | undefined): string => `"${value || "(none)"}"`;
+
+type ComparedField = [field: string, sent: string | undefined, booked: string | undefined];
+
+/**
+ * How the created bill payment's header differs from the payload sent; empty
+ * when it matches. `bookedDifferences` checks the lines and total, this checks
+ * the header fields carried over from the expense, in a fixed order. Location
+ * and print status are compared only when they were sent, and an absent value
+ * equals an empty one. Pure: it makes no QBO call.
+ */
+export function headerDifferences(payload: ConversionPayload, result: CreatedBillPayment): string[] {
+  const sentAccount = payload.CheckPayment?.BankAccountRef.value ?? payload.CreditCardPayment?.CCAccountRef.value;
+  const bookedAccount = result.CheckPayment?.BankAccountRef?.value ?? result.CreditCardPayment?.CCAccountRef?.value;
+  const sentPrintStatus = payload.CheckPayment?.PrintStatus;
+
+  const fields: ComparedField[] = [
+    ["Vendor", payload.VendorRef.value, result.VendorRef?.value],
+    ["Date", payload.TxnDate, result.TxnDate],
+    ["Pay type", payload.PayType, result.PayType],
+    ["Payment account", sentAccount, bookedAccount],
+    ["Memo", payload.PrivateNote, result.PrivateNote],
+    ...(payload.DepartmentRef ? [["Location", payload.DepartmentRef.value, result.DepartmentRef?.value] as ComparedField] : []),
+    ...(sentPrintStatus ? [["Print status", sentPrintStatus, result.CheckPayment?.PrintStatus] as ComparedField] : []),
+  ];
+  return fields
+    .filter(([, sent, booked]) => (sent ?? "") !== (booked ?? ""))
+    .map(([field, sent, booked]) => `${field}: sent ${shown(sent)}, booked ${shown(booked)}`);
+}
+
+/** Where a commit stopped, and what it had done by then. */
+interface CommitState {
+  plan: ConversionPlan;
+  billPaymentId: string;
+  url: string;
+  /** Ids of the attachments already linked to the bill payment, in order. */
+  moved: string[];
+}
+
+const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const indented = (text: string): string[] => text.split("\n").map((l) => `  ${l}`);
+const deleteCall = (entityType: string, id: string) => `delete_entity (entity_type "${entityType}", id "${id}", confirm true)`;
+const setRefNo = (docNumber: string, billPaymentId: string) =>
+  `set ref no. ${docNumber} on bill payment ${billPaymentId} in QuickBooks`;
+
+/** An edit_attachment instruction moving `ids` from one link target to another. */
+function relink(ids: string[], from: [type: string, id: string], to: [type: string, id: string]): string {
+  return (
+    `link ${ids.length === 1 ? "attachment" : "attachments"} ${ids.join(", ")} to ${to[0].replace("_", " ")} ${to[1]} ` +
+    `with edit_attachment (add_links entity_type "${to[0]}", entity_id "${to[1]}"; ` +
+    `remove_links entity_type "${from[0]}", entity_id "${from[1]}")`
+  );
+}
+
+/**
+ * The paragraph for a stop that leaves both the bill payment and the expense in
+ * place (verify, attachments, delete): the payment is counted twice, and the
+ * spelled-out calls finish the conversion or undo it. `finishFirst` and
+ * `undoFirst` are re-link steps that have to run before the delete.
+ */
+function countedTwice(state: CommitState, steps: { finishFirst?: string; undoFirst?: string } = {}): string[] {
+  const { plan, billPaymentId } = state;
+  const finish = [
+    ...(steps.finishFirst ? [steps.finishFirst] : []),
+    deleteCall("expense", plan.expenseId),
+    ...(plan.docNumber ? [setRefNo(plan.docNumber, billPaymentId)] : []),
+  ];
+  const undo = [...(steps.undoFirst ? [steps.undoFirst] : []), deleteCall("bill_payment", billPaymentId)];
+  return [
+    `Bill payment ${billPaymentId} and expense ${plan.expenseId} both exist, so the payment is counted twice ` +
+      "in Accounts Payable and the payment account until one of them is deleted.",
+    `To finish the conversion: ${finish.join(", then ")}.`,
+    `To undo it: ${undo.join(", then ")}.`,
+  ];
+}
+
+/** The steps a stop before the delete leaves undone, as one "Not done" line. */
+function notDone(state: CommitState, unmoved: string[]): string {
+  const { plan } = state;
+  return "Not done: " + [
+    ...(unmoved.length > 0 ? [`${plural(unmoved.length, "attachment")} not moved (${unmoved.join(", ")})`] : []),
+    `expense ${plan.expenseId} not deleted`,
+    ...(plan.docNumber ? [`ref no. ${plan.docNumber} not set`] : []),
+  ].join("; ") + ".";
+}
+
+/** Every stop report: the reason heading, the body, and the same two closing lines. */
+function stopReport(reason: string, body: string[], url: string): ToolResult {
+  const text = [
+    `Expense Conversion Stopped — ${reason}`,
+    "",
+    ...body,
+    "",
+    "Do not re-run this conversion.",
+    `View in QuickBooks: ${url}`,
+  ].join("\n");
+  return { content: [{ type: "text", text }], isError: true };
+}
+
+/** Stop 1: QuickBooks booked the bill payment differently from the payload. */
+function verifyStop(state: CommitState, differences: string[], result: CreatedBillPayment): ToolResult {
+  const { plan, billPaymentId, url } = state;
+  return stopReport("BILL PAYMENT NOT AS PREVIEWED", [
+    `QuickBooks created bill payment ${billPaymentId}, but booked it differently from what was sent:`,
+    ...differences.map((d) => `  ${d}`),
+    "",
+    "Booked by QuickBooks:",
+    ...formatBookedLines(plan.links, result),
+    "",
+    notDone(state, plan.attachments.map((a) => a.Id)),
+    "",
+    `Review bill payment ${billPaymentId} in QuickBooks: undo the conversion if it is wrong, finish it if it is right as booked.`,
+    ...countedTwice(state),
+  ], url);
+}
+
+/** Stop 2: an attachment could not be linked to the bill payment. */
+function attachmentStop(state: CommitState, failed: Attachable, error: unknown): ToolResult {
+  const { plan, billPaymentId, url, moved } = state;
+  const unmoved = plan.attachments.map((a) => a.Id).filter((id) => !moved.includes(id));
+  const expense: [string, string] = ["expense", plan.expenseId];
+  const billPayment: [string, string] = ["bill_payment", billPaymentId];
+  return stopReport("ATTACHMENTS NOT MOVED", [
+    `Done: bill payment ${billPaymentId} created; ` +
+      (moved.length > 0 ? `attachments moved to it: ${moved.join(", ")}.` : "no attachment moved to it."),
+    notDone(state, unmoved),
+    "",
+    `Moving attachment ${failed.Id} failed:`,
+    ...indented(formatQboError(error)),
+    "",
+    "Re-link attachments with edit_attachment before either delete, so none is left on a deleted transaction.",
+    ...countedTwice(state, {
+      finishFirst: relink(unmoved, expense, billPayment),
+      undoFirst: moved.length > 0 ? relink(moved, billPayment, expense) : undefined,
+    }),
+  ], url);
+}
+
+/** Stop 3: the expense could not be deleted. */
+function deleteStop(state: CommitState, error: unknown): ToolResult {
+  const { plan, billPaymentId, url, moved } = state;
+  return stopReport("EXPENSE NOT DELETED", [
+    `Done: bill payment ${billPaymentId} created; ${plural(moved.length, "attachment")} moved to it.`,
+    notDone(state, []),
+    "",
+    `Deleting expense ${plan.expenseId} failed:`,
+    ...indented(formatQboError(error)),
+    "",
+    ...countedTwice(state, {
+      undoFirst: moved.length > 0 ? relink(moved, ["bill_payment", billPaymentId], ["expense", plan.expenseId]) : undefined,
+    }),
+  ], url);
+}
+
+/** Stop 4: the expense is gone, but the ref no. did not land on the bill payment. */
+function refNoStop(state: CommitState, docNumber: string, failure: string[]): ToolResult {
+  const { plan, billPaymentId, url, moved } = state;
+  return stopReport("REF NO. NOT SET", [
+    `The conversion is otherwise complete: bill payment ${billPaymentId} created, ` +
+      `${plural(moved.length, "attachment")} moved, expense ${plan.expenseId} deleted.`,
+    "",
+    `Setting ref no. ${docNumber} on bill payment ${billPaymentId} failed:`,
+    ...failure,
+    "",
+    `To finish: ${setRefNo(docNumber, billPaymentId)}. No tool here edits a bill payment's ref no.`,
+  ], url);
+}
+
+/** The success result, with every header line read from what QuickBooks booked. */
+function renderSuccess(state: CommitState, result: CreatedBillPayment, refNo: string | undefined): string {
+  const { plan, billPaymentId, url, moved } = state;
+  const name = (ref: QBRef | undefined) => ref?.name || ref?.value || "(none)";
+  const account = plan.isCard ? result.CreditCardPayment?.CCAccountRef : result.CheckPayment?.BankAccountRef;
+  return [
+    `Expense Converted to Bill Payment (${plan.isCard ? "Credit Card" : "Check"})`,
+    "",
+    `Bill payment ${billPaymentId} created; expense ${plan.expenseId} deleted.`,
+    "",
+    `Vendor: ${name(result.VendorRef)}`,
+    `${plan.isCard ? "Card" : "Bank"} Account: ${name(account)}`,
+    `Date: ${result.TxnDate || "(none)"}`,
+    `Ref no.: ${refNo ?? "(none)"}`,
+    `Memo: ${result.PrivateNote || "(none)"}`,
+    `Location: ${name(result.DepartmentRef)}`,
+    "",
+    ...appliedBlock(plan),
+    "",
+    `Attachments moved: ${moved.length}`,
+    "",
+    `View in QuickBooks: ${url}`,
+  ].join("\n");
+}
+
+/**
+ * The writes (Design §4), on a plan built from this commit's own reads: create
+ * the bill payment, verify it, move each attachment, delete the expense, then
+ * set the ref no. Each step after create catches its own failure and returns a
+ * stop report; nothing is ever undone.
+ *
+ * Create comes first and the delete last. A failure in between then leaves the
+ * payment counted twice, which one visible delete_entity resolves. The other
+ * order could delete the expense and then fail to create its replacement,
+ * losing the payment from the books.
+ */
+async function commitConversion(client: QuickBooks, plan: ConversionPlan): Promise<ToolResult> {
+  const { expenseId, payload, docNumber } = plan;
+
+  // A rejected create has changed nothing, so it propagates unchanged.
+  const result = await promisifyWrite<unknown>((cb) =>
+    client.createBillPayment(payload, cb)
+  ) as CreatedBillPayment;
+
+  const state: CommitState = {
+    plan,
+    billPaymentId: result.Id,
+    url: buildQboUrl("billpayment", "txnId", result.Id),
+    moved: [],
+  };
+
+  // The create response is what is verified; it is not re-read.
+  const differences = [
+    ...headerDifferences(payload, result),
+    ...bookedDifferences(plan.links, plan.totalCents, result),
+  ];
+  if (differences.length > 0) return verifyStop(state, differences, result);
+
+  const purchaseRef = { type: "Purchase", value: expenseId };
+  const billPaymentRef = { type: "BillPayment", value: result.Id };
+  for (const attachment of plan.attachments) {
+    try {
+      const body = moveLinkBody(attachment, purchaseRef, billPaymentRef);
+      await promisifyWrite<unknown>((cb) =>
+        client.updateAttachable(body, cb)
+      );
+      state.moved.push(attachment.Id);
+    } catch (error) {
+      return attachmentStop(state, attachment, error);
+    }
+  }
+
+  try {
+    const body = buildDeleteBody(plan.expense as unknown as Record<string, unknown>, expenseId, "Expense");
+    await promisifyWrite<unknown>((cb) =>
+      client.deletePurchase(body, cb)
+    );
+  } catch (error) {
+    return deleteStop(state, error);
+  }
+
+  if (!docNumber) return { content: [{ type: "text", text: renderSuccess(state, result, undefined) }] };
+
+  // A Check's ref no. collides with the expense's (fault 6140) until the expense
+  // is gone, so it is set last. Moving attachments may bump the bill payment's
+  // SyncToken, so the update carries one read just before it.
+  let updated: CreatedBillPayment;
+  try {
+    const current = await promisify<unknown>((cb) => client.getBillPayment(result.Id, cb)) as CreatedBillPayment;
+    const body = {
+      Id: result.Id,
+      SyncToken: current.SyncToken,
+      sparse: true,
+      VendorRef: payload.VendorRef,
+      PayType: payload.PayType,
+      DocNumber: docNumber,
+    };
+    updated = await promisifyWrite<unknown>((cb) =>
+      client.updateBillPayment(body, cb)
+    ) as CreatedBillPayment;
+  } catch (error) {
+    return refNoStop(state, docNumber, indented(formatQboError(error)));
+  }
+  if (updated.DocNumber !== docNumber) {
+    return refNoStop(state, docNumber, [`  QuickBooks returned ref no. ${shown(updated.DocNumber)}.`]);
+  }
+
+  return { content: [{ type: "text", text: renderSuccess(state, result, updated.DocNumber) }] };
+}
+
 export async function handleConvertExpenseToBillPayment(
   client: QuickBooks,
   args: {
@@ -452,7 +761,7 @@ export async function handleConvertExpenseToBillPayment(
     include_line_description?: boolean;
     draft?: boolean;
   }
-): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
+): Promise<ToolResult> {
   const { expense_id, bills, include_line_description = true, draft = true } = args;
 
   const plan = await planConversion(client, { expense_id, bills, include_line_description });
@@ -460,6 +769,5 @@ export async function handleConvertExpenseToBillPayment(
   if (draft) {
     return { content: [{ type: "text", text: renderDraft(plan) }] };
   }
-
-  throw new Error("convert_expense_to_bill_payment: draft=false is not implemented yet");
+  return commitConversion(client, plan);
 }
