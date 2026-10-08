@@ -1778,6 +1778,46 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "convert_expense_to_bill_payment",
+    description: "Use only when the user explicitly asks to turn an existing expense into a bill payment. Do not use it to fix or recode an expense on your own. The expense is deleted and a new bill payment is created in its place, with a new id and create time. The pay type follows the expense (Check or Cash becomes Check, CreditCard becomes Credit Card). The expense must have one line on an Accounts Payable account, a vendor payee and home currency, be dated after the closing date, and not already be applied. Bill amounts default to each bill's open balance, may pay part of a bill, and must add up exactly to the expense total. The date, vendor, payment account, department, ref no. and attachments carry over; the line description folds into the memo unless include_line_description is false. Defaults to draft: true for a preview. A step that fails partway is reported, not undone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        expense_id: {
+          type: "string",
+          description: "ID of the expense (Purchase) to convert",
+        },
+        bills: {
+          type: "array",
+          description: "Bills the new bill payment pays. Their amounts must add up exactly to the expense total.",
+          items: {
+            type: "object",
+            properties: {
+              bill_id: {
+                type: "string",
+                description: "ID of the bill to pay",
+              },
+              amount: {
+                type: "number",
+                description: "Amount to apply (optional, defaults to the bill's open balance; may be lower to pay it partially)",
+              },
+            },
+            required: ["bill_id"],
+          },
+        },
+        include_line_description: {
+          type: "boolean",
+          description: "If true, fold the expense line's description into the memo (default: true)",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, validate and show preview without converting (default: true)",
+        },
+      },
+      required: ["expense_id", "bills"],
+    },
+  },
+  {
     name: "create_transfer",
     description: "Move money between two of the company's own accounts (QuickBooks 'Transfer') — bank to bank, or a credit-card paydown. Use this rather than create_expense, which would book the outflow as an expense and never touch the receiving account, or create_journal_entry, which posts the right result but does not read as a transfer in the register or the bank-feed match screen. Defaults to draft: true for a preview.",
     inputSchema: {
