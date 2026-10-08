@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 
 import { clearLookupCache } from "../../src/client/cache.js";
 import { toolDefinitions } from "../../src/tools/definitions.js";
-import { LINKED_TXN_TYPES } from "../../src/tools/handlers/bill-payment-links.js";
+import { CREATE_LINKED_TXN_TYPES } from "../../src/tools/handlers/bill-payment-links.js";
 import { validateToolArguments, ToolArgumentError, type ToolSchema } from "../../src/tools/validate.js";
 
 beforeEach(() => clearLookupCache());
@@ -29,7 +29,7 @@ describe("create_bill_payment schema", () => {
     );
   });
 
-  it("schema-required-and-enum — only txn_date is required and linked_txns items are typed from LINKED_TXN_TYPES", () => {
+  it("schema-required-and-enum — only txn_date is required and linked_txns items declare txn_type, txn_id and amount", () => {
     const s = schema() as unknown as {
       required: string[];
       properties: Record<string, { items?: { properties: Record<string, { enum?: string[] }>; required: string[] } }>;
@@ -42,7 +42,24 @@ describe("create_bill_payment schema", () => {
     assert.ok(item, "linked_txns must declare items");
     assert.deepEqual(Object.keys(item.properties).sort(), ["amount", "txn_id", "txn_type"]);
     assert.deepEqual(item.required, ["txn_type", "txn_id"]);
-    assert.deepEqual(item.properties.txn_type.enum, [...LINKED_TXN_TYPES]);
+  });
+
+  it("schema-enum-is-create-types — the txn_type enum is the create types and the descriptions state the Purchase refusal", () => {
+    const s = schema() as unknown as {
+      properties: Record<string, { description?: string; items?: { properties: Record<string, { enum?: string[] }> } }>;
+    };
+    const enumValues = s.properties.linked_txns.items?.properties.txn_type.enum;
+    assert.deepEqual(enumValues, [...CREATE_LINKED_TXN_TYPES]);
+    assert.ok(!enumValues?.includes("Purchase"));
+    assert.ok(definition?.description?.includes("Purchase links are refused"), definition?.description);
+    assert.ok(s.properties.linked_txns.description?.includes("Purchase is refused"), s.properties.linked_txns.description);
+  });
+
+  it("schema-describes-mismatch-result — the description says a differing booking is an error that states what was booked", () => {
+    assert.ok(
+      definition?.description?.includes("the result is an error that states what was booked"),
+      definition?.description,
+    );
   });
 
   it("schema-rejects-declared-side — a linked_txns item cannot carry a caller-declared side", () => {
@@ -86,6 +103,8 @@ describe("bill payment docs", () => {
     const row = (tool: string): string => readme.split("\n").find((l) => l.startsWith(`| \`${tool}\` |`)) ?? "";
     assert.match(row("create_bill_payment"), /linked_txns/);
     assert.match(row("get_bill_payment"), /side/i);
+    assert.doesNotMatch(row("create_bill_payment"), /deposits or purchases/);
+    assert.match(row("create_bill_payment"), /Purchase links are refused/);
   });
 
   it("schema-required-and-enum — limitations doc has a Bill Payment section stating what is unverified", () => {
@@ -97,6 +116,24 @@ describe("bill payment docs", () => {
     for (const topic of ["JournalEntry", "Deposit", "Purchase", "BankAccountRef"]) {
       assert.ok(section.includes(topic), `section should mention ${topic}`);
     }
+  });
+
+  it("schema-required-and-enum — limitations doc records Purchase links as not applied", () => {
+    const doc = read("docs/quickbooks-api-limitations.md");
+    const section = doc.split(/^## /m).find((s) => /^.*Bill Payment/.test(s.split("\n")[0])) ?? "";
+    const subsections = section.split(/^### /m);
+    const verified = subsections.find((s) => s.startsWith("Verified: Purchase links are not applied through the API"));
+    assert.ok(verified, "Purchase verified subsection missing");
+    assert.ok(verified.includes("ValidationFault 6000"));
+    assert.ok(verified.includes("BankAccountRef"));
+    const unverified = subsections.find((s) => s.split("\n")[0] === "Unverified") ?? "";
+    assert.ok(unverified, "Unverified subsection missing");
+    assert.ok(!unverified.includes("Purchase"), "Unverified should no longer mention Purchase");
+    assert.ok(unverified.includes("Deposit"));
+    assert.ok(section.includes("### When QBO accepts a link but does not apply it"));
+    assert.ok(!section.includes("drop it from"));
+    const purchaseRow = section.split("\n").find((l) => l.startsWith("| `Purchase`")) ?? "";
+    assert.ok(purchaseRow.includes("reads only"));
   });
 
   it("schema-required-and-enum — entity-coverage BillPayment row notes the $0 shape", () => {
