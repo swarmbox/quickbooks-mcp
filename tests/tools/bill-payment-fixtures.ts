@@ -221,6 +221,20 @@ export interface FakeClientOptions {
   records?: Partial<Record<"Bill" | "VendorCredit" | "JournalEntry" | "Deposit" | "Purchase" | "BillPayment", Records>>;
   /** Delay every get* read so concurrency can be observed. */
   delayMs?: number;
+  /** Rows appended to `ACCOUNTS` for findAccounts. */
+  accounts?: Array<Record<string, unknown>>;
+  /** What getPreferences returns. Defaults to a USD home currency and no close date. */
+  preferences?: Record<string, unknown>;
+  /**
+   * What findAttachables draws from: only the Attachables whose refs name the entity
+   * type (case-insensitive) and id in the criteria are returned. Absent, nothing is.
+   */
+  attachables?: Array<Record<string, unknown>>;
+  /**
+   * Methods to make reject, by name. With `id`, only a call whose first argument is
+   * that id (or an object with that `Id`) rejects. The call is still recorded.
+   */
+  fail?: Record<string, { error: unknown; id?: string }>;
 }
 
 export interface FakeClient {
@@ -277,10 +291,25 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
     );
   };
 
-  const client = {
+  const attachablesFor = (criteria: unknown): Array<Record<string, unknown>> => {
+    const text = typeof criteria === "string" ? criteria : JSON.stringify(criteria);
+    const type = /EntityRef\.Type\s*=\s*'([^']*)'/i.exec(text)?.[1]?.toLowerCase();
+    const id = /EntityRef\.value\s*=\s*'([^']*)'/i.exec(text)?.[1];
+    return (options.attachables ?? []).filter((a) =>
+      ((a.AttachableRef ?? []) as Array<{ EntityRef: { type: string; value: string } }>).some(
+        (r) => r.EntityRef.type.toLowerCase() === type && r.EntityRef.value === id,
+      ),
+    );
+  };
+
+  const methods = {
     findAccounts: (_criteria: unknown, cb: Callback<unknown>) => {
       calls.push("findAccounts");
-      cb(null, { QueryResponse: { Account: structuredClone(ACCOUNTS) } });
+      cb(null, { QueryResponse: { Account: structuredClone([...ACCOUNTS, ...(options.accounts ?? [])]) } });
+    },
+    getPreferences: (cb: Callback<unknown>) => {
+      calls.push("getPreferences");
+      cb(null, structuredClone(options.preferences ?? { CurrencyPrefs: { HomeCurrency: { value: "USD" } } }));
     },
     findVendors: (_criteria: unknown, cb: Callback<unknown>) => {
       calls.push("findVendors");
@@ -314,11 +343,32 @@ export function fakeClient(options: FakeClientOptions = {}): FakeClient {
       sent.push(payload);
       cb(null, options.createBillPayment?.(payload) ?? { ...structuredClone(payload), Id: "950", SyncToken: "0" });
     },
-    findAttachables: (_criteria: unknown, cb: Callback<unknown>) => {
+    findAttachables: (criteria: unknown, cb: Callback<unknown>) => {
       calls.push("findAttachables");
-      cb(null, { QueryResponse: {} });
+      const found = attachablesFor(criteria);
+      cb(null, { QueryResponse: found.length > 0 ? { Attachable: structuredClone(found) } : {} });
     },
-  } as unknown as QuickBooks;
+  };
+
+  // A failing method records its call and rejects without running the original.
+  const wrapped: Record<string, unknown> = { ...methods };
+  for (const [name, { error, id }] of Object.entries(options.fail ?? {})) {
+    const original = wrapped[name] as ((...args: unknown[]) => void) | undefined;
+    wrapped[name] = (...args: unknown[]) => {
+      const cb = args[args.length - 1] as Callback<unknown>;
+      const first = args[0] as string | { Id?: unknown } | undefined;
+      const subject = typeof first === "object" ? first?.Id : first;
+      if (id === undefined || String(subject) === id) {
+        calls.push(name);
+        cb(error, undefined);
+      } else if (original) {
+        original(...args);
+      } else {
+        cb(new Error(`${name} is not faked`), undefined);
+      }
+    };
+  }
+  const client = wrapped as unknown as QuickBooks;
 
   return {
     client,
