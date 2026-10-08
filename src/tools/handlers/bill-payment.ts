@@ -35,10 +35,21 @@ function linkLabel(link: ResolvedLink): string {
 }
 
 /**
+ * The BillPayment `Line` array for resolved links: one line per link, in order,
+ * applying `applyCents` (as dollars) to that single linked transaction.
+ */
+export function billPaymentLines(links: ResolvedLink[]): BillPaymentLine[] {
+  return links.map((l) => ({
+    Amount: toDollars(l.applyCents),
+    LinkedTxn: [{ TxnId: l.id, TxnType: l.type }],
+  }));
+}
+
+/**
  * The applied lines shared by the draft preview and the created result. Listings
  * name a link by its QBO TxnType and show what stays open after this payment.
  */
-function formatLinkLines(links: ResolvedLink[]): string[] {
+export function formatLinkLines(links: ResolvedLink[]): string[] {
   return links.map((l) =>
     `  ${l.type} ${l.id} (#${l.doc || "?"}, ${l.date || "?"}) — ${l.side}: ` +
     `open $${formatDollars(l.openCents)}, applying $${formatDollars(l.applyCents)}, ` +
@@ -66,11 +77,22 @@ function excessCreditMessage(links: ResolvedLink[], chargeCents: number, creditC
     : `${opening} To bring it to $0, remove ${linkLabel(absorber)}.`;
 }
 
-/** The fields of QBO's created BillPayment that the check and its report read. */
-interface CreatedBillPayment {
+/**
+ * The fields of QBO's created BillPayment that the check and its report read,
+ * plus the header fields a caller compares or copies from the created record.
+ */
+export interface CreatedBillPayment {
   Id: string;
+  SyncToken?: string;
   DocNumber?: string;
   TotalAmt?: number;
+  VendorRef?: { value: string; name?: string };
+  TxnDate?: string;
+  PayType?: string;
+  CheckPayment?: { BankAccountRef?: { value: string; name?: string }; PrintStatus?: string };
+  CreditCardPayment?: { CCAccountRef?: { value: string; name?: string } };
+  PrivateNote?: string;
+  DepartmentRef?: { value: string; name?: string };
   Line?: BillPaymentLine[];
 }
 
@@ -105,7 +127,7 @@ function bookedEntries(result: CreatedBillPayment): BookedEntry[] {
  * one link split across lines is summed. An absent TotalAmt reads as 0, as it does
  * in get_bill_payment.
  */
-function bookedDifferences(links: ResolvedLink[], totalCents: number, result: CreatedBillPayment): string[] {
+export function bookedDifferences(links: ResolvedLink[], totalCents: number, result: CreatedBillPayment): string[] {
   const entries = bookedEntries(result);
   const bookedByKey = new Map<string, number>();
   for (const { link, cents } of entries) {
@@ -151,7 +173,7 @@ function bookedDifferences(links: ResolvedLink[], totalCents: number, result: Cr
  * What QBO booked, one entry per booked line per linked transaction. A credit is
  * signed negative by the side of the matching sent link, as in get_bill_payment.
  */
-function formatBookedLines(links: ResolvedLink[], result: CreatedBillPayment): string[] {
+export function formatBookedLines(links: ResolvedLink[], result: CreatedBillPayment): string[] {
   const sideByKey = new Map(links.map((l) => [linkKey(l.type, l.id), l.side]));
   const entries = bookedEntries(result).map(({ link, cents }) => {
     if (!link) return `  Line with no linked transaction: $${formatDollars(cents)}`;
@@ -237,10 +259,7 @@ export async function handleCreateBillPayment(
     TotalAmt: toDollars(totalCents),
     ...(memo && { PrivateNote: memo }),
     ...(doc_number && { DocNumber: doc_number }),
-    Line: links.map((l) => ({
-      Amount: toDollars(l.applyCents),
-      LinkedTxn: [{ TxnId: l.id, TxnType: l.type }],
-    })),
+    Line: billPaymentLines(links),
   };
 
   const bankAccountLine = `Bank Account: ${bankAccountRef ? bankAccountRef.name : "(none — $0 application)"}`;

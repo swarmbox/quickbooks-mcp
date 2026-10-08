@@ -47,6 +47,8 @@ export interface ResolvedLink {
   side: ApSide;
   openCents: number;
   applyCents: number;
+  /** The A/P account the fetched record posts to; present only when it carries `APAccountRef`. */
+  apAccountId?: string;
 }
 
 /** Reads per resolve call fan out at most this many at a time. */
@@ -84,6 +86,8 @@ export interface LinkedTxnRecord {
   Credit?: boolean;
   VendorRef?: PayeeRef;
   EntityRef?: PayeeRef;
+  /** The A/P account a Bill posts to; absent on types that carry none. */
+  APAccountRef?: PayeeRef;
   Line?: LinkedTxnLine[];
 }
 
@@ -347,7 +351,10 @@ export async function resolveLinks(
       );
     }
 
-    return { type, id, doc: txn.DocNumber, date: txn.TxnDate, side, openCents, applyCents };
+    return {
+      type, id, doc: txn.DocNumber, date: txn.TxnDate, side, openCents, applyCents,
+      ...(txn.APAccountRef?.value && { apAccountId: txn.APAccountRef.value }),
+    };
   });
 }
 

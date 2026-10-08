@@ -691,6 +691,110 @@ error naming the payment and what was booked. It never deletes the payment.
 A type shown not to apply gets a `createRefusal` in `LINK_KINDS` and stays in
 `LINKED_TXN_TYPES`, because reads still classify it.
 
+## Converting an Expense to a Bill Payment
+
+In the QBO UI an existing expense or check (a `Purchase`) can be turned into a
+bill payment by adding one of the vendor's open bills to it and saving. The UI
+does this in place: the same transaction id is re-typed as a bill payment, its
+account lines are dropped, and a link to the bill is added. That save goes
+through the UI's internal endpoint, authorised by the browser session, not
+through the public Accounting API.
+
+### The public API cannot convert in place
+
+Neither UI route works through the API (see "Verified: Purchase links are not
+applied through the API" above):
+
+- **Re-typing the Purchase.** A header or line `LinkedTxn` to a bill on a
+  `Purchase` is accepted with HTTP 200 and ignored, on create and on sparse
+  update, for every `PaymentType`.
+- **Applying the expense on a bill payment.** A `BillPayment` line linking the
+  `Purchase` is dropped, and QBO books only the bill line at the bill's amount.
+
+The only API route to the same books is to create a `BillPayment` against the
+bill and delete the `Purchase`. The result has a new transaction id, a new create
+time and its own audit trail, and it takes writes that are not atomic.
+
+### What `convert_expense_to_bill_payment` does
+
+The tool is for explicit requests only. It accepts a single-line expense whose
+line is coded to an Accounts Payable account, paid to a vendor, in home
+currency, outside a closed period, and not already applied by another bill
+payment. Every bill it applies must sit on that same A/P account, and the bill
+amounts must add up to the expense total exactly. A Check or Cash expense becomes
+a `PayType: "Check"` bill payment on the same bank account; a CreditCard expense
+becomes `PayType: "CreditCard"` on the same card account.
+
+On `draft: false` it re-reads and re-checks everything, then runs:
+
+1. **Create** the bill payment.
+2. **Verify** the response against what was sent: the booked total and lines,
+   and the header fields (vendor, date, pay type, payment account, memo, and
+   location and print status when sent).
+3. **Move attachments** from the expense to the bill payment.
+4. **Delete** the expense, with the SyncToken from this commit's own read.
+5. **Set the ref no.** on the bill payment, when the expense had one.
+
+Create comes first because its worst failure mode is visible and cheap: the
+payment is counted twice in A/P and the payment account until one
+`delete_entity` call resolves it. Deleting first would risk losing the expense
+with no payment recorded in its place.
+
+The tool stops at the first failure and undoes nothing. A failed create has
+changed nothing and surfaces as an ordinary error. Every later stop returns an
+error report headed `Expense Conversion Stopped`, naming the ids, what was and
+was not done, where the payment is counted twice, and the call that finishes or
+undoes it:
+
+- **Bill payment not as previewed** (step 2): the expense is not deleted.
+- **Attachments not moved** (step 3): the expense is not deleted.
+- **Expense not deleted** (step 4).
+- **Ref no. not set** (step 5): there is no edit tool for bill payments, so the
+  report says to set it in QuickBooks.
+
+Each report ends with "Do not re-run this conversion": once a bill is only
+partly paid, a rerun would not be refused.
+
+### Ref no. is set after the delete
+
+A Check expense's `DocNumber` cannot be reused while the expense exists. Creating
+a bill payment with the same number fails with fault 6140 (duplicate document
+number), and the number space is shared between checks and bill payments.
+Setting it on the bill payment with a sparse update after the delete works.
+
+Whether Cash and CreditCard expenses collide the same way was not tested. The
+tool sets the ref no. after the delete for every pay type, so the answer does not
+matter.
+
+### Verified in a sandbox company (2026-10-07)
+
+- **A/P account is derived from the bill.** A bill payment created without
+  `APAccountRef`, against a bill on a second A/P account, cleared that account
+  and left the other A/P account untouched. `APAccountRef` is not echoed in the
+  create response even when it is sent, so the tool does not send it and instead
+  refuses a bill on a different A/P account from the expense line.
+- **Print status carries over.** `CheckPayment.PrintStatus` is kept on create
+  and survives the sparse update that sets the ref no.
+- **Attachments outlive the delete.** Deleting a `Purchase` does not delete its
+  Attachables; each keeps an `AttachableRef` to the deleted Purchase id. That is
+  why the tool moves them to the bill payment before the delete. An Attachable
+  re-linked by a full update that keeps its writable fields is listed on the bill
+  payment.
+- **Balances net out.** Converting a Check, Cash or CreditCard expense left the
+  bill's `Balance` at 0 and the A/P and payment-account balances where they
+  started.
+- **A deleted Purchase reads back as fault 610.** So does a `Purchase` id the UI
+  has re-typed into a bill payment. The tool reports a 610 on the expense as "not
+  found — it may already have been converted or deleted".
+
+### Unverified: location
+
+`DepartmentRef` on a created bill payment is unverified: the sandbox has
+location tracking off, and it could not be turned on through the Preferences
+API. The tool sends the expense's `DepartmentRef` and its header check compares
+the booked value with the one sent. A dropped or changed location stops the run
+before the expense is deleted.
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)

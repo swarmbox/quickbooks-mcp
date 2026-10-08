@@ -157,7 +157,7 @@ const VALID_TYPES = Object.keys(ENTITY_CONFIG).join(", ");
  * does so for every entity type — the extension blocks differ per entity but the
  * hazard does not.
  */
-function buildDeleteBody(entity: Record<string, unknown> | undefined, id: string, label: string): { Id: string; SyncToken: string } {
+export function buildDeleteBody(entity: Record<string, unknown> | undefined, id: string, label: string): { Id: string; SyncToken: string } {
   const entityId = entity?.Id != null ? String(entity.Id).trim() : "";
   if (!entityId) {
     throw new Error(`Could not load ${label} #${id} to delete — QuickBooks returned no Id for it.`);

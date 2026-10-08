@@ -9,7 +9,7 @@ import type { QBRef } from "../../types/index.js";
 // so everything is optional; a present `false` is a real answer. A present
 // `null` is not expected from the API but is treated as absent, never rendered.
 type Maybe<T> = T | null;
-interface Preferences {
+export interface Preferences {
   AccountingInfoPrefs?: {
     BookCloseDate?: Maybe<string>;
     TrackDepartments?: Maybe<boolean>;

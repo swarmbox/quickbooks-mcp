@@ -115,6 +115,7 @@ declare module "node-quickbooks" {
     updateDeposit(deposit: object, callback: Callback<unknown>): void;
     updateCustomer(customer: object, callback: Callback<unknown>): void;
     updateVendorCredit(vendorCredit: object, callback: Callback<unknown>): void;
+    updateBillPayment(billPayment: object, callback: Callback<unknown>): void;
 
     // Delete methods
     deleteJournalEntry(idOrEntity: object | string, callback: Callback<unknown>): void;

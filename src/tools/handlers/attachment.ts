@@ -351,6 +351,32 @@ function buildUpdateBody(current: Attachable, changes: WritableAttachable): Reco
   };
 }
 
+/**
+ * The body of an Attachable update that moves one link from `from` to `to`, in
+ * place. Built on `buildUpdateBody`, so only writable fields are sent. Ref types
+ * match case-insensitively, as QBO returns them lower-cased in places. The
+ * replacement carries only `EntityRef { type, value }`: `LineInfo` and
+ * `IncludeOnSend` describe the old entity's line and send setting, and are
+ * meaningless on a different entity, so they are dropped rather than carried over.
+ * Every other ref is kept. Throws when the attachment is not linked to `from`.
+ */
+export function moveLinkBody(
+  current: Attachable,
+  from: { type: string; value: string },
+  to: { type: string; value: string },
+): Record<string, unknown> {
+  const fromKey = refKey(from.type, from.value);
+  const refs = current.AttachableRef ?? [];
+  const index = refs.findIndex((r) => refKey(r.EntityRef.type, r.EntityRef.value) === fromKey);
+  if (index === -1) {
+    throw new Error(`Attachment ${current.Id} is not linked to ${from.type} ${from.value}`);
+  }
+  const moved: AttachableRef[] = refs.map((r, i) =>
+    i === index ? { EntityRef: { type: to.type, value: to.value } } : r
+  );
+  return buildUpdateBody(current, { AttachableRef: moved });
+}
+
 // ---------------------------------------------------------------------------
 // Link targets
 // ---------------------------------------------------------------------------
