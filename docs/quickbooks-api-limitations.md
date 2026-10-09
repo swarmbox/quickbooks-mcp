@@ -672,6 +672,64 @@ one `BillPayment`:
 `get_bill_payment` still classifies the `Purchase` lines that UI-created payments
 carry.
 
+### Verified: unallocated credit-card BillPayment create variants rejected
+
+**REJECTED IN TESTED SANDBOX** (2026-10-09). Checked in Test Advanced Company
+(realm `4620816365341983180`) through direct HTTPS Accounting API v3 requests
+using Bun `fetch`, on `sandbox-quickbooks.api.intuit.com`, `minorversion=75`.
+A successful CompanyInfo read established sandbox identity before writes.
+The requests bypassed connector/MCP payload validation: all four rejections
+came from QBO, not a local restriction.
+
+The positive control used a disposable vendor (`59`), a $10 Bill (`258`) on
+A/P account `488`, and a $10 `CreditCard` BillPayment (`259`) on card account
+`410`. Create returned HTTP 200. Reading the payment back confirmed its pay
+type, total, card account and single `LinkedTxn` to that Bill; the Bill's
+balance changed from $10 to $0.
+
+The main test used a separate, newly created vendor (`60`) with balance zero.
+Queries confirmed no Bills, VendorCredits or BillPayments before the attempts,
+preventing automatic application to existing vendor transactions.
+
+All variants were POSTed to `/v3/company/4620816365341983180/billpayment?minorversion=75`.
+This is the actual serialized body for variant A; B–D sent the same fields
+with only the `Line` member added as shown below (`10` is JSON's numeric
+representation of $10.00):
+
+```json
+{"VendorRef":{"value":"60"},"APAccountRef":{"value":"488"},"PayType":"CreditCard","CreditCardPayment":{"CCAccountRef":{"value":"410"}},"TotalAmt":10,"TxnDate":"2026-10-09","PrivateNote":"SBX-UNALLOC-14e2ad13-20261009T1846"}
+```
+
+Every response was HTTP 400, QBO error code `2020`, with the exact message:
+`Required param missing, need to supply the required value for the API`.
+
+| Variant | Actual `Line` member | Exact error `Detail` |
+|---------|----------------------|----------------------|
+| A | omitted | `Required parameter Line is missing in the request` |
+| B | `"Line":[{"Amount":10}]` | `Required parameter LinkedTxn is missing in the request` |
+| C | `"Line":[{"Amount":10,"LinkedTxn":[]}]` | `Required parameter LinkedTxn is missing in the request` |
+| D | `"Line":[]` | `Required parameter Line is missing in the request` |
+
+No variant returned a created ID. Subsequent queries still found no Bills,
+VendorCredits or BillPayments for vendor `60`, whose balance remained zero.
+There were no apparent successes to read back, ambiguous create outcomes or
+blind retries.
+
+Cleanup used fresh reads and SyncTokens, deleting payment `259` before Bill
+`258` (both HTTP 200, subsequent reads fault `610`, `Object Not Found`), then
+deactivating vendors `59` and `60`. Readback confirmed both vendors inactive
+with zero balances; those two inactive master records remain. No session-created
+transactions or cleanup failures remained, and the A/P, card and control expense
+account balances matched their pre-test values. No production Accounting API
+calls or real payment processing were performed.
+
+**Scope of the finding:** these tested shapes cannot create a positive,
+unallocated credit-card BillPayment before an applied transaction exists.
+Do not rely on them for that export path. This is evidence for these payloads
+and this sandbox/minor version, not a universal guarantee about every possible
+payload; it does not establish that an applied transaction must specifically
+be a Bill rather than another supported A/P transaction type.
+
 ### Unverified
 
 Not yet proven through the API:
