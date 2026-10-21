@@ -2274,7 +2274,7 @@ export const toolDefinitions = [
   {
     name: "edit_vendor",
     annotations: { title: "Edit QuickBooks vendor", ...EDIT },
-    description: "Modify an existing vendor with a sparse update: only the fields passed change, and a partial bill_address is merged over the stored address. Set active=false to deactivate the vendor (QuickBooks' equivalent of delete). Draft is the default: draft=true shows each changed field before and after; set draft=false to apply. Read vendors with the query tool (SELECT * FROM Vendor WHERE ...).",
+    description: "Modify an existing vendor with a sparse update: only the fields passed change, and a partial bill_address is merged over the stored address. Set active=false to deactivate the vendor (QuickBooks' equivalent of delete). Display names are unique across customers, vendors and employees, so a new display_name that another customer, vendor or employee uses is refused before anything is written, naming each holder's list, id and stored name; the tool applies no naming convention. Note that reactivating restores the vendor's previous display name, which QuickBooks may suffix if that name is now taken, and the result shows the final name. A rename cannot be combined with active=false: rename and deactivate in two separate edits. Draft is the default: draft=true shows each changed field before and after; set draft=false to apply. Read vendors with the query tool (SELECT * FROM Vendor WHERE ...).",
     inputSchema: {
       type: "object",
       properties: {

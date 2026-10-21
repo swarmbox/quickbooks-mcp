@@ -344,7 +344,7 @@ QBO_INLINE_OUTPUT=true
 | `get_customer` | Fetch a customer by ID with SyncToken, contact info, addresses, balance, hierarchy and active status |
 | `edit_customer` | Modify a customer: name, contact info, addresses, notes, hierarchy, payment terms; `active: false` deactivates it |
 | `create_vendor` | Create a vendor (name parts, title, company, contact info, `bill_address`, `sales_term_ref`, `vendor_1099`); draft-first. A display name already used by a customer, vendor or employee is refused before any write, naming each holder's list, id and stored name; the tool applies no naming convention and never renames or suffixes the name |
-| `edit_vendor` | Sparse-update a vendor: name parts, contact info, `bill_address` (merged over the stored address), payment terms, 1099 flag; `active: false` deactivates it. Read vendors with `query` |
+| `edit_vendor` | Sparse-update a vendor: name parts, contact info, `bill_address` (merged over the stored address), payment terms, 1099 flag; `active: false` deactivates it. A rename to a name another customer, vendor or employee uses is refused, naming each holder; the tool applies no naming convention. Read vendors with `query` |
 | **Delete** | |
 | `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) or an attachment (`entity_type: attachable`) |
 | **Attachments** | |
@@ -377,7 +377,7 @@ actually store there:
 | `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
 | `sales_term_ref` | `create_bill` / `edit_bill`, `create_invoice` / `edit_invoice`, `create_customer` / `edit_customer` headers | A Term, by exact name (case-insensitive) or Id; a miss lists the available names. On bills a missing `due_date` is computed from it (`txn_date` plus the term's days); an explicit `due_date` is kept, and date-driven terms need `due_date`. |
 
-A vendor's display name must be unique across customers, vendors and employees, and a vendor created with `create_vendor` resolves by name in the other write tools straight away.
+A vendor's display name must be unique across customers, vendors and employees; a vendor created or renamed with `create_vendor` or `edit_vendor` resolves by its new name in the other write tools straight away, and a vendor deactivated with `edit_vendor` stops resolving.
 
 Each also has an `_id` form (`entity_id`, `customer_id`) if you already know the
 internal ID. On edit tools, the rule for line parameters is:

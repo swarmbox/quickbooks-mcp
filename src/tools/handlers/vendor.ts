@@ -1,9 +1,13 @@
 // Handlers for vendor tools (create, edit). Reads go through the `query` tool.
 //
 // QBO display names are one namespace across Vendor, Customer and Employee, so
-// create_vendor looks the trimmed name up in all three lists before the preview
-// and again before posting. A holder is reported by list, id and stored display
-// name. The handler applies no naming convention: the name it sends is the
+// both a create and a rename (an edit that changes the stored name) look the
+// trimmed name up in all three lists before the preview and again before
+// posting. The vendor being renamed is excluded from that lookup: QBO accepts a
+// case-only rename of a vendor to its own name, and the query matches
+// case-insensitively, so the vendor would otherwise be reported as the holder
+// that blocks its own rename. A holder is reported by list, id and stored display
+// name. The handlers apply no naming convention: the name they send is the
 // caller's, trimmed, and no message proposes a replacement.
 
 import QuickBooks from "node-quickbooks";
@@ -30,7 +34,17 @@ import {
 } from "../../utils/index.js";
 
 // QBO's code for "the name supplied already exists" (ValidationFault, HTTP 400).
+// A create answers with it; so does an update onto another vendor's name.
 const DUPLICATE_NAME_CODE = "6240";
+
+// An update onto a customer's or employee's name is a generic business-validation
+// fault (code 6000), identified only by its detail, e.g.:
+//   "Business Validation Error: This name is being used by another customer.
+//    Please use a different name. You can merge names only when their type
+//    (customer, vendor or employee) matches."
+// Every other 6000 is left alone: the code is broad.
+const BUSINESS_VALIDATION_CODE = "6000";
+const NAME_IN_USE_DETAIL = /name is being used by another (customer|vendor|employee)/i;
 
 // The Vendor fields the create and edit tools send or show.
 interface QBVendor {
@@ -54,12 +68,42 @@ interface QBVendor {
   Active?: boolean;
 }
 
+// A vendor write whose display name is checked: the trimmed name it sends,
+// whether it creates or updates, and (update) the vendor's own id, which never
+// counts as a holder of its own name.
+interface NameCheck {
+  name: string;
+  write: "create" | "update";
+  vendorId?: string;
+}
+
+function trimDisplayName(raw: string): string {
+  const name = raw.trim();
+  if (!name) throw new Error("display_name must not be blank");
+  return name;
+}
+
+// The holders of the name other than the vendor being written, in
+// findDisplayNameHolders order.
+async function findOtherHolders(client: QuickBooks, check: NameCheck): Promise<DisplayNameHolder[]> {
+  const holders = await findDisplayNameHolders(client, check.name);
+  return holders.filter((holder) => !(holder.type === "Vendor" && holder.id === check.vendorId));
+}
+
+// A name that cannot be written is a validation failure in draft as well as in
+// commit, so the preview never looks clean and then fails.
+async function assertNameFree(client: QuickBooks, check: NameCheck): Promise<void> {
+  const holders = await findOtherHolders(client, check);
+  if (holders.length > 0) throw new Error(nameTakenMessage(check, holders));
+}
+
 // One line per holder, in findDisplayNameHolders order. Only the stored names
-// QBO returned are quoted, so the message never proposes a name of its own.
-function nameTakenMessage(name: string, holders: DisplayNameHolder[]): string {
-  const vendorHolder = holders.find((holder) => holder.type === "Vendor");
+// QBO returned are quoted, so the message never proposes a name of its own. The
+// "use it instead" advice is for a create: a rename cannot merge into the holder.
+function nameTakenMessage(check: NameCheck, holders: DisplayNameHolder[]): string {
+  const vendorHolder = check.write === "create" ? holders.find((holder) => holder.type === "Vendor") : undefined;
   return [
-    `Display name "${name}" is already used in QuickBooks:`,
+    `Display name "${check.name}" is already used in QuickBooks:`,
     ...holders.map((holder) => `  - ${holder.type} ${holder.id}: "${holder.displayName}"`),
     ...(vendorHolder
       ? [`A vendor with this name already exists (id ${vendorHolder.id}); use it instead of creating one.`]
@@ -69,34 +113,55 @@ function nameTakenMessage(name: string, holders: DisplayNameHolder[]): string {
   ].join("\n");
 }
 
-// QBO answered the create with a duplicate-name fault: nothing was committed. The
-// Detail carries the holder's id but not its list, so look the holders up again
-// to name them; a failed re-lookup still reports the fault and the id.
-async function duplicateNameError(client: QuickBooks, name: string, err: unknown): Promise<Error> {
+// Whether QBO rejected the write because the display name is taken.
+function isDuplicateNameFault(err: unknown): boolean {
+  return (
+    extractQboFault(err)?.errors.some(
+      (e) =>
+        e.code === DUPLICATE_NAME_CODE ||
+        (e.code === BUSINESS_VALIDATION_CODE && NAME_IN_USE_DETAIL.test(e.detail ?? ""))
+    ) ?? false
+  );
+}
+
+// QBO answered the write with a duplicate-name fault: nothing was committed. A
+// create's Detail carries the holder's id but not its list (an update's carries
+// neither), so look the holders up again to name them; a failed re-lookup still
+// reports the fault and the id when there is one.
+async function duplicateNameError(client: QuickBooks, check: NameCheck, err: unknown): Promise<Error> {
   const detail = extractQboFault(err)?.errors.find((e) => e.code === DUPLICATE_NAME_CODE)?.detail;
   const id = detail?.match(/Id=(\d+)/)?.[1];
   const duplicateOf = `as a duplicate${id ? ` of id ${id}` : ""}`;
-  const rejected = `QuickBooks rejected the create: ${formatQboError(err)}`;
+  const rejected = `QuickBooks rejected the ${check.write}: ${formatQboError(err)}`;
 
   let holders: DisplayNameHolder[];
   try {
-    holders = await findDisplayNameHolders(client, name);
+    holders = await findOtherHolders(client, check);
   } catch (lookupError) {
     return new Error(
       [
-        `QuickBooks rejected display name "${name}" ${duplicateOf}; looking up the record that holds it also failed: ${formatQboError(lookupError)}`,
+        `QuickBooks rejected display name "${check.name}" ${duplicateOf}; looking up the record that holds it also failed: ${formatQboError(lookupError)}`,
         rejected,
       ].join("\n")
     );
   }
 
-  if (holders.length > 0) return new Error([nameTakenMessage(name, holders), rejected].join("\n"));
+  if (holders.length > 0) return new Error([nameTakenMessage(check, holders), rejected].join("\n"));
   return new Error(
     [
-      `QuickBooks rejected display name "${name}" ${duplicateOf}, but no active customer, vendor or employee with that name was found.`,
+      `QuickBooks rejected display name "${check.name}" ${duplicateOf}, but no active customer, vendor or employee with that name was found.`,
       rejected,
     ].join("\n")
   );
+}
+
+// What a handler throws for a rejected write. The duplicate-name fault is the one
+// rejection rewritten (it committed nothing), and only for a write that checked a
+// name. Anything else comes back as the original object so the auth retry and the
+// write barrier treat this like every other write.
+async function vendorWriteError(client: QuickBooks, check: NameCheck | undefined, err: unknown): Promise<unknown> {
+  if (check && isDuplicateNameFault(err)) return duplicateNameError(client, check, err);
+  return err;
 }
 
 export async function handleCreateVendor(
@@ -127,8 +192,7 @@ export async function handleCreateVendor(
     draft = true,
   } = args;
 
-  const display_name = args.display_name.trim();
-  if (!display_name) throw new Error("display_name must not be blank");
+  const display_name = trimDisplayName(args.display_name);
 
   // Build QB Vendor object
   const vendorObj: Record<string, unknown> = {
@@ -156,10 +220,8 @@ export async function handleCreateVendor(
     termName = termRef.name;
   }
 
-  // A name that cannot be created is a validation failure in draft as well as in
-  // commit, so the preview never looks clean and then fails.
-  const holders = await findDisplayNameHolders(client, display_name);
-  if (holders.length > 0) throw new Error(nameTakenMessage(display_name, holders));
+  const nameCheck: NameCheck = { name: display_name, write: "create" };
+  await assertNameFree(client, nameCheck);
 
   if (draft) {
     const preview = [
@@ -192,13 +254,7 @@ export async function handleCreateVendor(
       client.createVendor(vendorObj, cb)
     ) as QBVendor;
   } catch (err) {
-    // The duplicate-name fault is the one rejection rewritten here; it committed
-    // nothing. Anything else propagates as the original object so the auth retry
-    // and the write barrier treat this like every other write.
-    if (extractQboFault(err)?.errors.some((e) => e.code === DUPLICATE_NAME_CODE)) {
-      throw await duplicateNameError(client, display_name, err);
-    }
-    throw err;
+    throw await vendorWriteError(client, nameCheck, err);
   }
 
   rememberVendor({ Id: result.Id, DisplayName: result.DisplayName, Active: result.Active });
@@ -239,11 +295,20 @@ export async function handleEditVendor(
   }
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   const {
-    id, display_name, title, given_name, middle_name, family_name, suffix,
+    id, title, given_name, middle_name, family_name, suffix,
     company_name, email, phone, mobile,
     bill_address, print_on_check_name, acct_num, sales_term_ref, vendor_1099, active,
     draft = true,
   } = args;
+
+  // Both refusals come before any QuickBooks call.
+  const display_name = args.display_name === undefined ? undefined : trimDisplayName(args.display_name);
+  if (display_name !== undefined && active === false) {
+    throw new Error(
+      "display_name cannot be combined with active=false: QuickBooks drops a rename sent with a deactivation. " +
+        "Rename and deactivate in two separate edits."
+    );
+  }
 
   // Fetch fresh so the SyncToken is current and the address merge sees the
   // stored value.
@@ -283,6 +348,14 @@ export async function handleEditVendor(
     updated.TermRef = toQboRef(resolveTermRef(await getTermCache(client), sales_term_ref));
   }
 
+  // An exact comparison, so a case-only change counts as a rename and is checked.
+  // The check runs in draft and in commit, each against the current lists.
+  const renamed = display_name !== undefined && display_name !== current.DisplayName;
+  const nameCheck: NameCheck | undefined = renamed
+    ? { name: display_name, write: "update", vendorId: current.Id }
+    : undefined;
+  if (nameCheck) await assertNameFree(client, nameCheck);
+
   const qboUrl = buildQboUrl("vendordetail", "nameId", id);
 
   if (draft) {
@@ -321,19 +394,31 @@ export async function handleEditVendor(
     if (active !== undefined) previewLines.push(`  Active: ${current.Active !== false} → ${active}`);
 
     previewLines.push("");
+    if (renamed) previewLines.push("Name check: no other active customer, vendor or employee uses this display name.");
     previewLines.push("Fields not listed are left unchanged. Set draft=false to apply these changes.");
 
     return { content: [{ type: "text", text: previewLines.join("\n") }] };
   }
 
-  const result = await promisifyWrite<unknown>((cb) =>
-    client.updateVendor(updated, cb)
-  ) as QBVendor;
+  let result: QBVendor;
+  try {
+    result = await promisifyWrite<unknown>((cb) =>
+      client.updateVendor(updated, cb)
+    ) as QBVendor;
+  } catch (err) {
+    throw await vendorWriteError(client, nameCheck, err);
+  }
 
-  return {
-    content: [{
-      type: "text",
-      text: formatUpdateResult("Vendor", id, current.SyncToken, result.SyncToken, qboUrl),
-    }],
-  };
+  // Deactivation and reactivation can change the display name even when the caller
+  // sent none, so the cache and the text take the name and status from the response.
+  rememberVendor({ Id: result.Id, DisplayName: result.DisplayName, Active: result.Active });
+
+  const text = [
+    formatUpdateResult("Vendor", id, current.SyncToken, result.SyncToken, qboUrl),
+    ...(result.DisplayName !== current.DisplayName
+      ? [`Display Name: ${current.DisplayName} → ${result.DisplayName}`]
+      : []),
+  ].join("\n");
+
+  return { content: [{ type: "text", text }] };
 }

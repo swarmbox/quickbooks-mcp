@@ -177,24 +177,49 @@ export async function getVendorCache(client: QuickBooks): Promise<VendorCache> {
 }
 
 /**
- * Make a vendor created this session resolvable by name or id straight away.
+ * Record a vendor, as a committed create or edit left it, in the loaded vendor
+ * cache. The cache holds at most one entry per vendor Id afterwards.
  *
  * Without this, a vendor created by create_vendor is missing from the bulk
  * vendor cache, and so unresolvable by create_bill and the other write tools,
- * for up to the 15-minute TTL. The vendor is inserted into the loaded cache;
+ * for up to the 15-minute TTL; and a vendor renamed by edit_vendor would keep
+ * resolving by its old name for as long. So an existing entry is replaced (in
+ * place, which keeps the order the partial matcher walks) and its old name stops
+ * resolving; a new vendor is appended. A vendor that is no longer active is
+ * removed instead, because a bulk load lists active vendors only, so a reload
+ * would drop it too. A vendor with no `Active` key counts as active.
+ *
  * fetchedAt is left alone so the TTL is not extended. With no cache loaded there
- * is nothing to insert into: the next load lists the vendor itself.
+ * is nothing to update: the next load lists the vendor itself.
  *
  * Bumping the generation guards the race where a getVendorCache load starts
- * before the create and finishes after it: storing that listing would overwrite
- * this insert with a list that lacks the new vendor.
+ * before the create or edit and finishes after it: storing that listing would
+ * overwrite this change with a list that predates it.
  */
 export function rememberVendor(vendor: CachedVendor): void {
   vendorCacheGeneration++;
   if (!vendorCache) return;
-  vendorCache.items.push(vendor);
-  vendorCache.byId.set(vendor.Id, vendor);
-  vendorCache.byName.set(vendor.DisplayName.toLowerCase(), vendor);
+
+  const { items, byId, byName } = vendorCache;
+  const previous = byId.get(vendor.Id);
+  if (previous) {
+    // Another vendor may have taken this name since; only drop a key that is
+    // still this vendor's.
+    const previousKey = previous.DisplayName.toLowerCase();
+    if (byName.get(previousKey)?.Id === vendor.Id) byName.delete(previousKey);
+  }
+
+  const index = items.findIndex((v) => v.Id === vendor.Id);
+  if (vendor.Active === false) {
+    if (index !== -1) items.splice(index, 1);
+    byId.delete(vendor.Id);
+    return;
+  }
+
+  if (index !== -1) items[index] = vendor;
+  else items.push(vendor);
+  byId.set(vendor.Id, vendor);
+  byName.set(vendor.DisplayName.toLowerCase(), vendor);
 }
 
 // Payment terms are a short list, so they are bulk-loaded like vendors. Inactive

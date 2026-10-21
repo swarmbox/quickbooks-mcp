@@ -857,7 +857,7 @@ before the expense is deleted.
 
 QuickBooks requires a `DisplayName` to be unique across the Customer, Vendor and
 Employee lists together, not within each list. A vendor cannot take a name a
-customer or an employee already uses, and the fault QuickBooks returns does not
+customer or an employee already uses, and the fault a create returns does not
 say which list holds it.
 
 ### Verified in a sandbox company (2026-10-21)
@@ -899,6 +899,70 @@ If the create still returns 6240 (a holder created between lookup and post, or a
 name the lookup cannot match), the tool runs the lookup again to name the
 holder. When none is found it reports the `Id=` from the fault's Detail instead.
 
+### Renames and status changes (verified 2026-10-21)
+
+Probed on a sparse `updateVendor` in a sandbox company, with invented vendors.
+
+- **A rename onto another vendor's name is fault 6240 with no id.** A
+  `ValidationFault`, code `6240`, Message `Duplicate Name Exists Error` and
+  Detail `The name supplied already exists. : Another Vendor is already using
+  this name.  Please use a different name.` There is no `Id=`. Nothing is
+  merged; both vendors are unchanged.
+- **A rename onto a customer's or employee's name is fault 6000 with no id.**
+  `ValidationFault`, code `6000`, Message `A business validation error has
+  occurred while processing your request` and Detail `Business Validation
+  Error: This name is being used by another customer. Please use a different
+  name. You can merge names only when their type (customer, vendor or employee)
+  matches.` The detail says `another employee` for an employee holder.
+- **The update path ignores case and trailing whitespace, as far as probed.**
+  The same fault came back for a vendor holder's name exactly and lower-cased
+  with a trailing space, an employee holder's name lower-cased with a trailing
+  space, and a customer holder's name exactly.
+- **A case-only rename of a vendor to its own name is accepted.** The stored
+  name takes the new case and SyncToken advances. Query `=` ignores case, so a
+  lookup for the new name finds the vendor itself.
+- **A rename to its own name plus a trailing space is a no-op.** It is accepted
+  and SyncToken does not advance.
+- **Deactivating renames the vendor `"<name> (deleted)"`.** The response carries
+  `Active: false` and that `DisplayName`, even when the caller sent no name.
+- **Reactivating restores `"<name>"`.** The response `DisplayName` is the
+  previous name.
+- **Reactivating while another vendor now holds `"<name>"` is accepted and
+  suffixed `"<name>-1"`.** There is no fault; QuickBooks applies the suffix
+  itself.
+- **A rename sent with `Active: false` is dropped.** The update is accepted with
+  no fault, but the response `DisplayName` is the vendor's current name plus
+  ` (deleted)`, not the new name. Probed twice.
+- **A rename sent with `Active: true` is applied.** The new name is stored and
+  the vendor is active.
+
+### How edit_vendor uses this
+
+`edit_vendor` trims a given `display_name` and refuses a blank one. When the
+trimmed name differs from the stored name (an exact comparison, so a case-only
+change counts), it runs the same lookup as `create_vendor` across all three
+lists with the vendor's own id excluded, once before the draft preview and again
+before posting. Excluding the vendor is required: query `=` ignores case, so a
+case-only self-rename would otherwise find the vendor itself. If another record
+holds the name the tool refuses in draft and commit alike, before any write,
+naming each holder's list, id and stored name. The tool applies no naming
+convention.
+
+If the update is still rejected after a rename, either fault shape (6240, or
+6000 whose detail says the name is being used by another customer, vendor or
+employee) runs the lookup again to name the holder. Neither fault carries an id,
+so the lookup is the only way to name one. Any other rejection propagates
+unchanged.
+
+A `display_name` combined with `active=false` is refused before any QuickBooks
+call, because QuickBooks drops the rename; rename and deactivate in two separate
+edits. A rename combined with `active=true` is applied, so the check runs on it.
+
+Deactivating and reactivating can change the display name even when the caller
+sends none, so the session vendor cache and the commit text take the name and
+status from the update response, not from the request. The commit text adds a
+`Display Name: <before> → <after>` line when the two differ.
+
 ### Unverified
 
 - **Names containing a backslash.** node-quickbooks escapes `'` but not `\`, so
@@ -911,6 +975,13 @@ holder. When none is found it reports the `Id=` from the fault's Detail instead.
   its id.
 - **Other name lists.** Whether any name list beyond the three takes part in the
   namespace was not tested.
+- **Reactivating onto a customer's or employee's name.** Only a vendor holder
+  was probed. Whether a reactivated vendor whose old name a customer or employee
+  now holds is also suffixed is unverified.
+- **A second collision.** Whether it is suffixed `-2` is unverified.
+- **Rename plus reactivate onto a held name.** Only a free name was probed, so
+  whether a rename sent with `Active: true` behaves the same when the new name
+  is held is unverified.
 
 ## References
 
