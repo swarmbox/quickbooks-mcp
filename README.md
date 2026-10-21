@@ -343,7 +343,8 @@ QBO_INLINE_OUTPUT=true
 | `create_customer` | Create a customer or sub-customer (name parts, contact info, addresses, hierarchy via `parent_ref`, `sales_term_ref`) |
 | `get_customer` | Fetch a customer by ID with SyncToken, contact info, addresses, balance, hierarchy and active status |
 | `edit_customer` | Modify a customer: name, contact info, addresses, notes, hierarchy, payment terms; `active: false` deactivates it |
-| `create_vendor` | Create a vendor (name parts, company, contact info, `bill_address`, `sales_term_ref`); draft-first. A display name already used by a customer, vendor or employee is refused before any write, naming each holder's list, id and stored name; the tool applies no naming convention and never renames or suffixes the name |
+| `create_vendor` | Create a vendor (name parts, title, company, contact info, `bill_address`, `sales_term_ref`, `vendor_1099`); draft-first. A display name already used by a customer, vendor or employee is refused before any write, naming each holder's list, id and stored name; the tool applies no naming convention and never renames or suffixes the name |
+| `edit_vendor` | Sparse-update a vendor: name parts, contact info, `bill_address` (merged over the stored address), payment terms, 1099 flag; `active: false` deactivates it. Read vendors with `query` |
 | **Delete** | |
 | `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) or an attachment (`entity_type: attachable`) |
 | **Attachments** | |

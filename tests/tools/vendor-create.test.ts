@@ -183,6 +183,7 @@ describe("create_vendor preview and payload", () => {
     const text = textOf(
       await create(fake.client, {
         display_name: NAME,
+        title: "Ms.",
         given_name: "Ada",
         middle_name: "B",
         family_name: "Lovelace",
@@ -195,6 +196,7 @@ describe("create_vendor preview and payload", () => {
         print_on_check_name: "Acme Supply Check",
         acct_num: "A-1001",
         sales_term_ref: "net 30",
+        vendor_1099: true,
         draft: false,
       })
     );
@@ -202,6 +204,7 @@ describe("create_vendor preview and payload", () => {
     assert.equal(fake.created.length, 1);
     assert.deepEqual(fake.created[0], {
       DisplayName: NAME,
+      Title: "Ms.",
       GivenName: "Ada",
       MiddleName: "B",
       FamilyName: "Lovelace",
@@ -214,11 +217,17 @@ describe("create_vendor preview and payload", () => {
       PrintOnCheckName: "Acme Supply Check",
       AcctNum: "A-1001",
       TermRef: { value: "3", name: "Net 30" },
+      Vendor1099: true,
     });
     const lines = text.split("\n");
-    for (const line of ["Vendor Created!", "ID: 70", "Display Name: Acme Supply"]) {
+    for (const line of [
+      "Vendor Created!",
+      "ID: 70",
+      "Display Name: Acme Supply",
+    ]) {
       assert.ok(lines.includes(line), `missing line "${line}" in:\n${text}`);
     }
+    assert.match(text, /^View in QuickBooks: \S+\/app\/vendordetail\?nameId=70$/m);
   });
 
   it("vendor-create-minimal-payload — sends only the display name and never looks up terms", async () => {

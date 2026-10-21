@@ -23,6 +23,7 @@ describe("create_vendor registration", () => {
     assert.deepEqual(schema.required, ["display_name"]);
     assert.deepEqual(Object.keys(schema.properties ?? {}), [
       "display_name",
+      "title",
       "given_name",
       "middle_name",
       "family_name",
@@ -35,6 +36,7 @@ describe("create_vendor registration", () => {
       "print_on_check_name",
       "acct_num",
       "sales_term_ref",
+      "vendor_1099",
       "draft",
     ]);
 

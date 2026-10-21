@@ -47,6 +47,7 @@ import {
   handleGetCustomer,
   handleEditCustomer,
   handleCreateVendor,
+  handleEditVendor,
   handleDeleteEntity,
   handleUploadAttachment,
   handleCreateAttachmentNote,
@@ -105,6 +106,7 @@ toolHandlers.set("create_customer", (client, args) => handleCreateCustomer(clien
 toolHandlers.set("get_customer", (client, args) => handleGetCustomer(client, args as { id: string }));
 toolHandlers.set("edit_customer", (client, args) => handleEditCustomer(client, args as Parameters<typeof handleEditCustomer>[1]));
 toolHandlers.set("create_vendor", (client, args) => handleCreateVendor(client, args as Parameters<typeof handleCreateVendor>[1]));
+toolHandlers.set("edit_vendor", (client, args) => handleEditVendor(client, args as Parameters<typeof handleEditVendor>[1]));
 toolHandlers.set("delete_entity", (client, args) => handleDeleteEntity(client, args as Parameters<typeof handleDeleteEntity>[1]));
 toolHandlers.set("upload_attachment", (client, args) => handleUploadAttachment(client, args as Parameters<typeof handleUploadAttachment>[1]));
 toolHandlers.set("create_attachment_note", (client, args) => handleCreateAttachmentNote(client, args as Parameters<typeof handleCreateAttachmentNote>[1]));
