@@ -4,6 +4,7 @@
 // dispatch can never drift apart.
 import { REPORT_NAMES } from "../reports/catalog.js";
 import { CREATE_LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
+import { addressSchema } from "../utils/address.js";
 
 export const toolDefinitions = [
   {
@@ -1988,40 +1989,8 @@ export const toolDefinitions = [
           type: "string",
           description: "Mobile phone number (optional)",
         },
-        bill_address: {
-          type: "object",
-          description: "Billing address (optional)",
-          properties: {
-            line1: { type: "string" },
-            line2: { type: "string" },
-            line3: { type: "string" },
-            line4: { type: "string" },
-            line5: { type: "string" },
-            city: { type: "string" },
-            country_sub_division_code: { type: "string", description: "State/province code" },
-            postal_code: { type: "string" },
-            country: { type: "string" },
-            lat: { type: "string" },
-            long: { type: "string" },
-          },
-        },
-        ship_address: {
-          type: "object",
-          description: "Shipping address (optional, same shape as bill_address)",
-          properties: {
-            line1: { type: "string" },
-            line2: { type: "string" },
-            line3: { type: "string" },
-            line4: { type: "string" },
-            line5: { type: "string" },
-            city: { type: "string" },
-            country_sub_division_code: { type: "string", description: "State/province code" },
-            postal_code: { type: "string" },
-            country: { type: "string" },
-            lat: { type: "string" },
-            long: { type: "string" },
-          },
-        },
+        bill_address: addressSchema("Billing address (optional)"),
+        ship_address: addressSchema("Shipping address (optional, same shape as bill_address)"),
         notes: {
           type: "string",
           description: "Notes about the customer (optional)",
@@ -2119,40 +2088,8 @@ export const toolDefinitions = [
           type: "string",
           description: "New mobile phone number",
         },
-        bill_address: {
-          type: "object",
-          description: "New billing address",
-          properties: {
-            line1: { type: "string" },
-            line2: { type: "string" },
-            line3: { type: "string" },
-            line4: { type: "string" },
-            line5: { type: "string" },
-            city: { type: "string" },
-            country_sub_division_code: { type: "string", description: "State/province code" },
-            postal_code: { type: "string" },
-            country: { type: "string" },
-            lat: { type: "string" },
-            long: { type: "string" },
-          },
-        },
-        ship_address: {
-          type: "object",
-          description: "New shipping address",
-          properties: {
-            line1: { type: "string" },
-            line2: { type: "string" },
-            line3: { type: "string" },
-            line4: { type: "string" },
-            line5: { type: "string" },
-            city: { type: "string" },
-            country_sub_division_code: { type: "string", description: "State/province code" },
-            postal_code: { type: "string" },
-            country: { type: "string" },
-            lat: { type: "string" },
-            long: { type: "string" },
-          },
-        },
+        bill_address: addressSchema("New billing address"),
+        ship_address: addressSchema("New shipping address"),
         notes: {
           type: "string",
           description: "New notes about the customer",
@@ -2192,6 +2129,69 @@ export const toolDefinitions = [
         },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "create_vendor",
+    description: "Create a vendor, draft first: the default call validates and previews without writing, and draft=false creates it. QuickBooks display names are unique across customers, vendors and employees, so a name already in use is refused before anything is written, and the refusal names each holder's list, id and stored name. The tool applies no naming convention: the display name is used as given (trimmed), never suffixed, renamed or proposed. Returns vendor details and a link to view in QuickBooks.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        display_name: {
+          type: "string",
+          description: "Primary display name (must be unique across customers, vendors and employees in QuickBooks)",
+        },
+        given_name: {
+          type: "string",
+          description: "First/given name (optional)",
+        },
+        middle_name: {
+          type: "string",
+          description: "Middle name (optional)",
+        },
+        family_name: {
+          type: "string",
+          description: "Last/family name (optional)",
+        },
+        suffix: {
+          type: "string",
+          description: "Name suffix, e.g., 'Jr.' (optional)",
+        },
+        company_name: {
+          type: "string",
+          description: "Company name (optional)",
+        },
+        email: {
+          type: "string",
+          description: "Primary email address (optional)",
+        },
+        phone: {
+          type: "string",
+          description: "Primary phone number (optional)",
+        },
+        mobile: {
+          type: "string",
+          description: "Mobile phone number (optional)",
+        },
+        bill_address: addressSchema("Billing address (optional)"),
+        print_on_check_name: {
+          type: "string",
+          description: "Name to print on checks (optional)",
+        },
+        acct_num: {
+          type: "string",
+          description: "Account number the vendor uses for this company (optional)",
+        },
+        sales_term_ref: {
+          type: "string",
+          description: "Vendor's default payment terms name (e.g., 'Net 30'). Will be looked up to get ID.",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, validate and show preview without creating (default: true)",
+        },
+      },
+      required: ["display_name"],
     },
   },
   {

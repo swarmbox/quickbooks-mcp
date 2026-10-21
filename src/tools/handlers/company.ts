@@ -2,8 +2,7 @@
 
 import QuickBooks from "node-quickbooks";
 import { promisify, getCompanyIdValue } from "../../client/index.js";
-import { outputReport } from "../../utils/index.js";
-import { formatAddress, type QBAddress } from "./customer.js";
+import { outputReport, formatAddress, type QBAddress } from "../../utils/index.js";
 
 // Only the fields the summary reads; QBO omits a key when it is unset, so all
 // are optional. The full object passes through to outputReport untyped.

@@ -28,6 +28,10 @@ let departmentCache: DepartmentCache | null = null;
 let classCache: ClassCache | null = null;
 let accountCache: AccountCache | null = null;
 let vendorCache: VendorCache | null = null;
+// Bumped by rememberVendor and clearLookupCache, never reset. getVendorCache
+// stores a load only if the generation is unchanged since the load began, so a
+// load in flight across either event cannot overwrite what that event did.
+let vendorCacheGeneration = 0;
 let employeeCache: EmployeeCache | null = null;
 let termCache: TermCache | null = null;
 // Item cache: lazy per-entry lookup (not bulk-loaded like others)
@@ -42,6 +46,7 @@ export function clearLookupCache(): void {
   classCache = null;
   accountCache = null;
   vendorCache = null;
+  vendorCacheGeneration++;
   employeeCache = null;
   termCache = null;
   itemCacheById.clear();
@@ -51,7 +56,7 @@ export function clearLookupCache(): void {
 }
 
 // Helper to extract entities from QB query response with type safety
-function extractQueryResults<T>(result: unknown, entityKey: string): T[] {
+export function extractQueryResults<T>(result: unknown, entityKey: string): T[] {
   const response = result as QBQueryResponse<T> | undefined;
   const entities = response?.QueryResponse?.[entityKey];
   return Array.isArray(entities) ? entities : [];
@@ -153,6 +158,7 @@ export async function getVendorCache(client: QuickBooks): Promise<VendorCache> {
     return vendorCache;
   }
 
+  const generation = vendorCacheGeneration;
   const result = await promisify<unknown>((cb) => client.findVendors({ fetchAll: true }, cb));
   const items = extractQueryResults<CachedVendor>(result, 'Vendor');
 
@@ -163,8 +169,32 @@ export async function getVendorCache(client: QuickBooks): Promise<VendorCache> {
     byName.set(vendor.DisplayName.toLowerCase(), vendor);
   }
 
-  vendorCache = { items, byId, byName, fetchedAt: Date.now() };
-  return vendorCache;
+  const loaded: VendorCache = { items, byId, byName, fetchedAt: Date.now() };
+  // A rememberVendor or clearLookupCache ran while this load was in flight, so
+  // its listing may predate that change: return it to this caller, don't store it.
+  if (generation === vendorCacheGeneration) vendorCache = loaded;
+  return loaded;
+}
+
+/**
+ * Make a vendor created this session resolvable by name or id straight away.
+ *
+ * Without this, a vendor created by create_vendor is missing from the bulk
+ * vendor cache, and so unresolvable by create_bill and the other write tools,
+ * for up to the 15-minute TTL. The vendor is inserted into the loaded cache;
+ * fetchedAt is left alone so the TTL is not extended. With no cache loaded there
+ * is nothing to insert into: the next load lists the vendor itself.
+ *
+ * Bumping the generation guards the race where a getVendorCache load starts
+ * before the create and finishes after it: storing that listing would overwrite
+ * this insert with a list that lacks the new vendor.
+ */
+export function rememberVendor(vendor: CachedVendor): void {
+  vendorCacheGeneration++;
+  if (!vendorCache) return;
+  vendorCache.items.push(vendor);
+  vendorCache.byId.set(vendor.Id, vendor);
+  vendorCache.byName.set(vendor.DisplayName.toLowerCase(), vendor);
 }
 
 // Payment terms are a short list, so they are bulk-loaded like vendors. Inactive
