@@ -339,6 +339,11 @@ QBO_INLINE_OUTPUT=true
 | `receive_payment` | Record a customer payment against open invoices (A/R counterpart to `create_bill_payment`); each line defaults to the invoice's open balance |
 | `create_transfer` | Move money between two of the company's own accounts (bank↔bank, credit-card paydown) |
 | `get_bill_payment` | Fetch a bill payment by ID; signs each linked transaction by side (credit/charge) and flags unapplied amounts |
+| **Customers & Vendors** | |
+| `create_customer` | Create a customer or sub-customer (name parts, contact info, addresses, hierarchy via `parent_ref`, `sales_term_ref`) |
+| `get_customer` | Fetch a customer by ID with SyncToken, contact info, addresses, balance, hierarchy and active status |
+| `edit_customer` | Modify a customer: name, contact info, addresses, notes, hierarchy, payment terms; `active: false` deactivates it |
+| `create_vendor` | Create a vendor (name parts, company, contact info, `bill_address`, `sales_term_ref`); draft-first. A display name already used by a customer, vendor or employee is refused before any write, naming each holder's list, id and stored name; the tool applies no naming convention and never renames or suffixes the name |
 | **Delete** | |
 | `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) or an attachment (`entity_type: attachable`) |
 | **Attachments** | |
@@ -370,6 +375,8 @@ actually store there:
 | `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. |
 | `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
 | `sales_term_ref` | `create_bill` / `edit_bill`, `create_invoice` / `edit_invoice`, `create_customer` / `edit_customer` headers | A Term, by exact name (case-insensitive) or Id; a miss lists the available names. On bills a missing `due_date` is computed from it (`txn_date` plus the term's days); an explicit `due_date` is kept, and date-driven terms need `due_date`. |
+
+A vendor's display name must be unique across customers, vendors and employees, and a vendor created with `create_vendor` resolves by name in the other write tools straight away.
 
 Each also has an `_id` form (`entity_id`, `customer_id`) if you already know the
 internal ID. On edit tools, the rule for line parameters is:

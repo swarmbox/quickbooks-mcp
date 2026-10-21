@@ -17,6 +17,7 @@ export {
   getClassCache,
   getAccountCache,
   getVendorCache,
+  rememberVendor,
   getTermCache,
   describeTermRef,
   getEmployeeCache,
@@ -46,6 +47,8 @@ export type {
   ResolvedEntityRef,
   ResolveAccountOptions,
 } from './refs.js';
+export { findDisplayNameHolders } from './display-names.js';
+export type { DisplayNameHolder } from './display-names.js';
 export {
   resolveEntityRef,
   resolveCustomerRef,

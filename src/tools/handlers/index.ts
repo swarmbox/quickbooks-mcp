@@ -28,6 +28,7 @@ export { handleCreateVendorCredit, handleGetVendorCredit, handleEditVendorCredit
 export { handleCreateBillPayment, handleGetBillPayment } from './bill-payment.js';
 export { handleConvertExpenseToBillPayment } from './convert-expense.js';
 export { handleCreateCustomer, handleGetCustomer, handleEditCustomer } from './customer.js';
+export { handleCreateVendor } from './vendor.js';
 export { handleDeleteEntity } from './delete.js';
 export {
   handleUploadAttachment,

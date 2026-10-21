@@ -92,6 +92,7 @@ declare module "node-quickbooks" {
     createSalesReceipt(salesReceipt: object, callback: Callback<unknown>): void;
     createInvoice(invoice: object, callback: Callback<unknown>): void;
     createCustomer(customer: object, callback: Callback<unknown>): void;
+    createVendor(vendor: object, callback: Callback<unknown>): void;
     createVendorCredit(vendorCredit: object, callback: Callback<unknown>): void;
     createBillPayment(billPayment: object, callback: Callback<unknown>): void;
 

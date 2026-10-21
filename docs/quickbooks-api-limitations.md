@@ -853,6 +853,65 @@ API. The tool sends the expense's `DepartmentRef` and its header check compares
 the booked value with the one sent. A dropped or changed location stops the run
 before the expense is deleted.
 
+## Display Names Are One Namespace Across Customers, Vendors and Employees
+
+QuickBooks requires a `DisplayName` to be unique across the Customer, Vendor and
+Employee lists together, not within each list. A vendor cannot take a name a
+customer or an employee already uses, and the fault QuickBooks returns does not
+say which list holds it.
+
+### Verified in a sandbox company (2026-10-21)
+
+- **A duplicate name is fault 6240, and it names an id but no list.** A vendor
+  create whose name is held by a customer, an employee or another vendor fails
+  with HTTP 400, a `ValidationFault`, code `6240`, Message
+  `Duplicate Name Exists Error` and Detail
+  `The name supplied already exists. : Id=<holder id>`. The `Id=` alone cannot
+  tell which list the holder is in.
+- **The uniqueness check ignores case and trailing whitespace.** The same name
+  in a different case is rejected with 6240, and so is the same name with a
+  trailing space.
+- **Query `=` ignores case but does not trim.** `DisplayName = '<name in lower
+  case>'` matches the stored name; `DisplayName = '<name> '` with a trailing
+  space matches nothing. A lookup has to trim the name itself.
+- **`\'` escaping works.** A `'` inside a quoted query value escaped as `\'`
+  matches. node-quickbooks array criteria already escape it that way.
+- **The default name-list query is active-only.** Inactive records appear only
+  when the query adds `Active IN (true, false)`.
+- **Inactive vendors are renamed `(deleted)` / `(deleted-1)` and release the
+  name.** QuickBooks renames an inactivated vendor `"<name> (deleted)"`, then
+  `(deleted-1)` and so on, and a new vendor can be created with the original
+  name.
+
+### How create_vendor uses this
+
+`create_vendor` trims the display name and looks it up with an exact
+`DisplayName =` query in all three lists (`findDisplayNameHolders`,
+`src/client/display-names.ts`), once before the draft preview and again before
+posting. Because query `=` already ignores case, no case folding is needed, and
+the default active-only scope matches the uniqueness scope. If any list holds
+the name, the tool refuses in draft and commit alike, before any write, and
+names each holder's list, id and stored name. A failed lookup aborts rather than
+reading as "name free". The tool applies no naming convention: it never
+suffixes, renames or proposes a name.
+
+If the create still returns 6240 (a holder created between lookup and post, or a
+name the lookup cannot match), the tool runs the lookup again to name the
+holder. When none is found it reports the `Id=` from the fault's Detail instead.
+
+### Unverified
+
+- **Names containing a backslash.** node-quickbooks escapes `'` but not `\`, so
+  such a name may not match the lookup. The 6240 fallback still refuses it.
+- **Internal whitespace.** Whether the uniqueness check normalizes runs of
+  spaces inside a name was not tested.
+- **Inactive customers and employees.** Only vendors were probed. Whether
+  inactive customers and employees release their names as inactive vendors do is
+  unverified; if one does not, the lookup misses it and the 6240 fallback names
+  its id.
+- **Other name lists.** Whether any name list beyond the three takes part in the
+  namespace was not tested.
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)
