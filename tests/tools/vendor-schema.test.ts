@@ -64,3 +64,44 @@ describe("create_vendor registration", () => {
     assert.ok(unknown.content[0].text.includes('Unknown parameter "vendor_type"'));
   });
 });
+
+describe("edit_vendor description", () => {
+  it("schema-edit-vendor-description — tells callers about the rename guard, reactivation and the deactivate split", () => {
+    const tool = toolDefinitions.find((t) => t.name === "edit_vendor");
+    assert.ok(tool, "edit_vendor must be defined");
+
+    const schema = tool.inputSchema as unknown as SchemaNode;
+    assert.deepEqual(schema.required, ["id"]);
+    assert.deepEqual(Object.keys(schema.properties ?? {}), [
+      "id",
+      "display_name",
+      "title",
+      "given_name",
+      "middle_name",
+      "family_name",
+      "suffix",
+      "company_name",
+      "email",
+      "phone",
+      "mobile",
+      "bill_address",
+      "print_on_check_name",
+      "acct_num",
+      "sales_term_ref",
+      "vendor_1099",
+      "active",
+      "draft",
+    ]);
+
+    for (const phrase of [
+      "unique across customers, vendors and employees",
+      "refused",
+      "no naming convention",
+      "reactivat",
+      "two separate edits",
+    ]) {
+      assert.ok(tool.description.includes(phrase), `description must include "${phrase}"`);
+    }
+    assert.ok(!tool.description.includes("[C]"));
+  });
+});
