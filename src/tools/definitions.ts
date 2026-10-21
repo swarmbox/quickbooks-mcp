@@ -6,9 +6,37 @@ import { REPORT_NAMES } from "../reports/catalog.js";
 import { CREATE_LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
 import { addressSchema } from "../utils/address.js";
 
+// MCP tool annotations, which clients such as claude.ai and Claude Desktop use
+// to group a connector's tools into read-only and write permissions. They are
+// hints for the client, not enforcement: draft mode and confirm are what guard
+// the books. Every tool calls the QuickBooks API, so openWorldHint is true.
+//
+//   READ        reads only; repeating it changes nothing.
+//   CREATE      adds a record (draft-by-default tools are still writes); a
+//               repeat adds a second one, so not idempotent.
+//   EDIT        changes fields on an existing record; the same edit twice
+//               leaves the same record, and the record survives, so it is
+//               idempotent and not destructive.
+//   EDIT_LINES  an EDIT that also takes line changes. A line without a line_id
+//               is appended, so a repeat can add a second line: not idempotent.
+//   DELETE      permanently removes a record: destructive. Deleting the same
+//               record twice has no further effect, so idempotent.
+//   CONVERT     replaces a record with a new one of another type: the original
+//               is deleted, so destructive, and a repeat finds nothing to
+//               convert or creates again, so not idempotent.
+//   AUTH        stores local OAuth credentials; changes local state only.
+const READ = { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
+const CREATE = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+const EDIT = { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true } as const;
+const EDIT_LINES = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+const DELETE = { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: true } as const;
+const CONVERT = { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true } as const;
+const AUTH = { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true } as const;
+
 export const toolDefinitions = [
   {
     name: "qbo_authenticate",
+    annotations: { title: "Authenticate with QuickBooks", ...AUTH },
     description: "Authenticate with QuickBooks using OAuth (local credential mode only). " +
       "Step 1: Call with no arguments to get the authorization URL. " +
       "Step 2: After authorizing in browser, call with authorization_code and realm_id from the callback URL. " +
@@ -30,6 +58,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_company_info",
+    annotations: { title: "Get QuickBooks company info", ...READ },
     description: "Get information about the connected QuickBooks company.",
     inputSchema: {
       type: "object",
@@ -39,6 +68,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_preferences",
+    annotations: { title: "Get QuickBooks preferences", ...READ },
     description: "Get company preferences, led by the books closing date, with a digest of accounting, currency, sales and purchase settings. Use this to check whether a period is closed before proposing an entry.",
     inputSchema: {
       type: "object",
@@ -48,6 +78,7 @@ export const toolDefinitions = [
   },
   {
     name: "query",
+    annotations: { title: "Query QuickBooks", ...READ },
     description: "Execute a QuickBooks query using SQL-like syntax. Supports querying any entity type (Customer, Vendor, Invoice, Bill, Account, Item, Department, etc.). Results are written to a file to preserve context. Defaults to MAXRESULTS 1000 if not specified. Examples: 'SELECT * FROM Customer', 'SELECT * FROM SalesReceipt WHERE TxnDate >= \\'2025-11-01\\' AND TxnDate <= \\'2025-11-30\\''",
     inputSchema: {
       type: "object",
@@ -62,6 +93,7 @@ export const toolDefinitions = [
   },
   {
     name: "list_accounts",
+    annotations: { title: "List QuickBooks accounts", ...READ },
     description: "List all accounts in the chart of accounts. Returns AcctNum (the user-facing account number), Name, AccountType, AccountSubType, and CurrentBalance. Use AcctNum to reference accounts in other queries or operations.",
     inputSchema: {
       type: "object",
@@ -80,6 +112,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_profit_loss",
+    annotations: { title: "Get QuickBooks profit and loss", ...READ },
     description: "Get a Profit and Loss (Income Statement) report. Can be broken down by department/location.",
     inputSchema: {
       type: "object",
@@ -124,6 +157,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_balance_sheet",
+    annotations: { title: "Get QuickBooks balance sheet", ...READ },
     description: "Get a Balance Sheet report. Can be broken down by department/location.",
     inputSchema: {
       type: "object",
@@ -164,6 +198,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_report",
+    annotations: { title: "Run QuickBooks report", ...READ },
     description: "Run a QuickBooks report that has no dedicated tool: A/R and A/P aging, customer and vendor balances, transaction lists, general ledger, journal, sales by customer/item/class/department, cash flow, and detail variants. Answers what is outstanding and how old it is, which the entity query tools cannot — a report sees postings that carry no account reference in entity JSON. Profit and Loss, Balance Sheet and Trial Balance have their own tools.",
     inputSchema: {
       type: "object",
@@ -230,6 +265,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_trial_balance",
+    annotations: { title: "Get QuickBooks trial balance", ...READ },
     description: "Get a Trial Balance report. Useful for month-end close and reconciliation. Note: Trial Balance does not support department/location breakdown in QuickBooks Online.",
     inputSchema: {
       type: "object",
@@ -260,6 +296,7 @@ export const toolDefinitions = [
   },
   {
     name: "query_account_transactions",
+    annotations: { title: "Query QuickBooks account transactions", ...READ },
     description: "Query all transactions affecting a specific account, across all 13 posting transaction types. Returns a consolidated list with date, type, amount (debit/credit), and description. Useful for investigating account balance discrepancies. Note: the A/R side of invoices, credit memos, and payments has no account reference in QBO's data model and cannot appear here — use account_period_summary for A/R totals.",
     inputSchema: {
       type: "object",
@@ -298,6 +335,7 @@ export const toolDefinitions = [
   },
   {
     name: "account_period_summary",
+    annotations: { title: "Summarize QuickBooks account period", ...READ },
     description: "Get a period summary for an account: opening balance, total debits/credits, closing balance, and transaction count. Uses the General Ledger report. Supports department filtering.",
     inputSchema: {
       type: "object",
@@ -328,6 +366,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_journal_entry",
+    annotations: { title: "Create QuickBooks journal entry", ...CREATE },
     description: "Create a journal entry. Accepts account/department/entity names (will lookup IDs automatically). Validates debits=credits before creating. Lines may carry an entity (vendor, customer, or employee) — QuickBooks requires one on any line posting to Accounts Receivable or Accounts Payable. Returns entry details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -406,6 +445,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_journal_entry",
+    annotations: { title: "Get QuickBooks journal entry", ...READ },
     description: "Fetch a single journal entry by ID with full details including SyncToken (needed for edits). Returns formatted summary and writes full object to temp file.",
     inputSchema: {
       type: "object",
@@ -420,6 +460,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_journal_entry",
+    annotations: { title: "Edit QuickBooks journal entry", ...EDIT_LINES },
     description: "Modify an existing journal entry. Can update date, memo, doc_number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line, set delete=true to remove a line. A line_id preserves the line's existing entity unless entity_name/entity_id is given; pass entity_name: \"\" to clear it. Validates debits=credits before saving.",
     inputSchema: {
       type: "object",
@@ -501,6 +542,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_bill",
+    annotations: { title: "Create QuickBooks bill", ...CREATE },
     description: "Create a vendor bill. Accepts vendor/account/department names (will lookup IDs automatically). Optionally set payment terms with sales_term_ref (e.g., 'Net 30'); without due_date the due date is computed from the bill date and the term's days. Note: DepartmentRef is header-level only — for multi-department splits, create separate bills (one per department). Returns bill details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -612,6 +654,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_bill",
+    annotations: { title: "Get QuickBooks bill", ...READ },
     description: "Fetch a single bill by ID with full details including SyncToken (needed for edits). Returns vendor, date, due date, payment terms, amount, AP account, line details.",
     inputSchema: {
       type: "object",
@@ -626,6 +669,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_bill",
+    annotations: { title: "Edit QuickBooks bill", ...EDIT_LINES },
     description: "Modify an existing bill. Can update vendor, date, due date, payment terms, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
     inputSchema: {
       type: "object",
@@ -733,6 +777,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_expense",
+    annotations: { title: "Get QuickBooks expense", ...READ },
     description: "Fetch a single expense (Purchase) by ID with full details including SyncToken. Covers Expenses, Checks, and Credit Card charges. Returns payment type, account, date, amount, line details.",
     inputSchema: {
       type: "object",
@@ -747,6 +792,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_expense",
+    annotations: { title: "Edit QuickBooks expense", ...EDIT_LINES },
     description: "Modify an existing expense (Purchase). Can update date, memo, payment account, payee, and/or lines. The payee may be a vendor, customer, or employee — set entity_type to say which (defaults to Vendor). Note: PaymentType (Cash/Check/CreditCard) cannot be changed after creation.",
     inputSchema: {
       type: "object",
@@ -855,6 +901,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_expense",
+    annotations: { title: "Create QuickBooks expense", ...CREATE },
     description: "Create an expense (Purchase). Accepts account/department/payee names (will lookup IDs automatically). Covers Cash, Check, and Credit Card payment types. The payee may be a vendor, customer, or employee — set entity_type to say which (defaults to Vendor). Note: PaymentType cannot be changed after creation. DepartmentRef is header-level only. Returns expense details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -968,6 +1015,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_sales_receipt",
+    annotations: { title: "Get QuickBooks sales receipt", ...READ },
     description: "Fetch a single sales receipt by ID with full details including SyncToken (needed for edits). Returns customer, date, deposit account, department, line details with items/qty/price.",
     inputSchema: {
       type: "object",
@@ -982,6 +1030,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_sales_receipt",
+    annotations: { title: "Edit QuickBooks sales receipt", ...EDIT_LINES },
     description: "Modify an existing sales receipt. Can update date, memo, customer, deposit account, department, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires item_name), set delete=true to remove.",
     inputSchema: {
       type: "object",
@@ -1061,6 +1110,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_sales_receipt",
+    annotations: { title: "Create QuickBooks sales receipt", ...CREATE },
     description: "Create a sales receipt. Accepts item/customer/department names (will lookup IDs automatically). Lines reference items (products/services) not accounts. Returns receipt details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -1141,6 +1191,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_invoice",
+    annotations: { title: "Create QuickBooks invoice", ...CREATE },
     description: "Create an invoice. Accepts item/customer/department names (will lookup IDs automatically). Either customer_name or customer_id is REQUIRED — invoices must have a customer. Lines use SalesItemLineDetail (product/service references, not accounts). Returns invoice details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -1241,6 +1292,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_invoice",
+    annotations: { title: "Get QuickBooks invoice", ...READ },
     description: "Fetch a single invoice by ID with full details including SyncToken (needed for edits). Returns customer, date, due date, balance, department, line details with items/qty/price.",
     inputSchema: {
       type: "object",
@@ -1255,6 +1307,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_invoice",
+    annotations: { title: "Edit QuickBooks invoice", ...EDIT_LINES },
     description: "Modify an existing invoice. Can update date, due date, memo, customer, department, terms, email, online payment settings, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires item_name), set delete=true to remove.",
     inputSchema: {
       type: "object",
@@ -1354,6 +1407,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_deposit",
+    annotations: { title: "Create QuickBooks deposit", ...CREATE },
     description: "Create a bank deposit. Accepts account/department/entity names (will lookup IDs automatically). Lines represent the sources of the deposit — amounts can be positive (income) or negative (fees, deductions). Each line may name the vendor, customer, or employee it came from via entity_name/entity_type. QuickBooks computes the total from line amounts. Returns deposit details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -1427,6 +1481,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_deposit",
+    annotations: { title: "Get QuickBooks deposit", ...READ },
     description: "Fetch a single deposit by ID with full details including SyncToken (needed for edits). Returns deposit account, date, memo, and line details showing source accounts and amounts.",
     inputSchema: {
       type: "object",
@@ -1441,6 +1496,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_deposit",
+    annotations: { title: "Edit QuickBooks deposit", ...EDIT_LINES },
     description: "Modify an existing deposit. Can update date, memo, deposit account, department, and/or lines. CRITICAL for line changes: The QB Deposit API does NOT replace lines - it merges them. Lines WITH line_id update existing lines. Lines WITHOUT line_id are ADDED as new. Lines NOT included are KEPT unchanged. To 'delete' a line, you must include ALL existing lines with their line_ids and set unwanted lines to amount: 0. Line amounts must sum to the original deposit total (use expected_total to override for corrupted deposits). Entity (vendor/customer/employee) can be set on any line, new or existing, via entity_name/entity_type; a line_id with no entity input keeps whatever entity the line already had.",
     inputSchema: {
       type: "object",
@@ -1518,6 +1574,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_vendor_credit",
+    annotations: { title: "Create QuickBooks vendor credit", ...CREATE },
     description: "Create a vendor credit. Accepts vendor/account/department names (will lookup IDs automatically). Lines represent credit amounts applied to expense accounts. Returns credit details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -1598,6 +1655,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_vendor_credit",
+    annotations: { title: "Get QuickBooks vendor credit", ...READ },
     description: "Fetch a single vendor credit by ID with full details including SyncToken (needed for edits). Returns vendor, date, memo, ref number, AP account, and line details showing expense accounts and amounts.",
     inputSchema: {
       type: "object",
@@ -1612,6 +1670,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_vendor_credit",
+    annotations: { title: "Edit QuickBooks vendor credit", ...EDIT_LINES },
     description: "Modify an existing vendor credit. Can update vendor, date, memo, ref number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line (requires amount and account_name), set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
     inputSchema: {
       type: "object",
@@ -1683,6 +1742,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_bill_payment",
+    annotations: { title: "Create QuickBooks bill payment", ...CREATE },
     description: "Create a bill payment (the QBO 'check' / 'pay bills' flow) that applies Accounts Payable transactions for one vendor. Apply bills, vendor credits, or a JournalEntry or Deposit via linked_txns. Purchase links are refused: QuickBooks drops them from a bill payment created through the API and books the rest. The side of each (charge it settles, or credit it offsets) is derived from the transaction itself, never declared by the caller; the payment total is charges minus credits. Amounts default to each transaction's open amount and may be set lower to apply it partially. A $0 application (credits fully offsetting charges) needs no payment_account. Use this to record vendor ACH/EFT debits or checks so the bank feed can match them. Defaults to draft: true for a preview; returns payment details and a link to view in QuickBooks once committed. If QuickBooks books a total or lines that differ from what was sent, the result is an error that states what was booked; nothing is undone.",
     inputSchema: {
       type: "object",
@@ -1780,6 +1840,7 @@ export const toolDefinitions = [
   },
   {
     name: "convert_expense_to_bill_payment",
+    annotations: { title: "Convert QuickBooks expense to bill payment", ...CONVERT },
     description: "Use only when the user explicitly asks to turn an existing expense into a bill payment. Do not use it to fix or recode an expense on your own. The expense is deleted and a new bill payment is created in its place, with a new id and create time. The pay type follows the expense (Check or Cash becomes Check, CreditCard becomes Credit Card). The expense must have one line on an Accounts Payable account, a vendor payee and home currency, be dated after the closing date, and not already be applied. Bill amounts default to each bill's open balance, may pay part of a bill, and must add up exactly to the expense total. The date, vendor, payment account, department, ref no. and attachments carry over; the line description folds into the memo unless include_line_description is false. Defaults to draft: true for a preview. A step that fails partway is reported, not undone.",
     inputSchema: {
       type: "object",
@@ -1820,6 +1881,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_transfer",
+    annotations: { title: "Create QuickBooks transfer", ...CREATE },
     description: "Move money between two of the company's own accounts (QuickBooks 'Transfer') — bank to bank, or a credit-card paydown. Use this rather than create_expense, which would book the outflow as an expense and never touch the receiving account, or create_journal_entry, which posts the right result but does not read as a transfer in the register or the bank-feed match screen. Defaults to draft: true for a preview.",
     inputSchema: {
       type: "object",
@@ -1854,6 +1916,7 @@ export const toolDefinitions = [
   },
   {
     name: "receive_payment",
+    annotations: { title: "Receive QuickBooks customer payment", ...CREATE },
     description: "Record a customer payment against one or more open invoices (QuickBooks 'Receive Payment'), clearing Accounts Receivable. This is the A/R counterpart to create_bill_payment. Not a deposit — create_deposit banks money without settling an invoice — and not a sales receipt, which records a sale that was paid outright and never had an invoice. Defaults to draft: true for a preview.",
     inputSchema: {
       type: "object",
@@ -1912,6 +1975,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_bill_payment",
+    annotations: { title: "Get QuickBooks bill payment", ...READ },
     description: "Fetch a single bill payment by ID with full details including SyncToken. Shows vendor, date, pay type, bank account, each linked transaction (bill, vendor credit, journal entry, deposit or purchase) with its applied amount signed by side (credits negative, charges positive), and flags any unapplied amount (payment total not matching net applied lines).",
     inputSchema: {
       type: "object",
@@ -1926,6 +1990,7 @@ export const toolDefinitions = [
   },
   {
     name: "delete_entity",
+    annotations: { title: "Delete QuickBooks transaction", ...DELETE },
     description: "Permanently delete a QuickBooks transaction. Supports journal entries, bills, invoices, deposits, sales receipts, expenses, vendor credits, bill payments, and attachments. Uses a two-step flow: first call previews what will be deleted, second call with confirm=true executes the deletion. Note: Customers cannot be deleted — use edit_customer with active=false to deactivate instead.",
     inputSchema: {
       type: "object",
@@ -1949,6 +2014,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_customer",
+    annotations: { title: "Create QuickBooks customer", ...CREATE },
     description: "Create a customer or sub-customer. Accepts name parts, contact info, addresses, and hierarchy settings. Use parent_ref to create sub-customers or jobs. Returns customer details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -2030,6 +2096,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_customer",
+    annotations: { title: "Get QuickBooks customer", ...READ },
     description: "Fetch a single customer by ID with full details including SyncToken (needed for edits). Returns name, contact info, addresses, balance, hierarchy (parent/sub-customer), and active status.",
     inputSchema: {
       type: "object",
@@ -2044,6 +2111,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_customer",
+    annotations: { title: "Edit QuickBooks customer", ...EDIT },
     description: "Modify an existing customer. Can update name, contact info, addresses, notes, taxable status, active status, hierarchy (parent/sub-customer), delivery method, and payment terms. Set active=false to deactivate (QuickBooks equivalent of delete).",
     inputSchema: {
       type: "object",
@@ -2133,6 +2201,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_vendor",
+    annotations: { title: "Create QuickBooks vendor", ...CREATE },
     description: "Create a vendor, draft first: the default call validates and previews without writing, and draft=false creates it. QuickBooks display names are unique across customers, vendors and employees, so a name already in use is refused before anything is written, and the refusal names each holder's list, id and stored name. The tool applies no naming convention: the display name is used as given (trimmed), never suffixed, renamed or proposed. Returns vendor details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
@@ -2140,6 +2209,10 @@ export const toolDefinitions = [
         display_name: {
           type: "string",
           description: "Primary display name (must be unique across customers, vendors and employees in QuickBooks)",
+        },
+        title: {
+          type: "string",
+          description: "Contact title, e.g., 'Ms.' (optional)",
         },
         given_name: {
           type: "string",
@@ -2186,6 +2259,10 @@ export const toolDefinitions = [
           type: "string",
           description: "Vendor's default payment terms name (e.g., 'Net 30'). Will be looked up to get ID.",
         },
+        vendor_1099: {
+          type: "boolean",
+          description: "Track this vendor for 1099 reporting (optional)",
+        },
         draft: {
           type: "boolean",
           description: "If true, validate and show preview without creating (default: true)",
@@ -2195,7 +2272,88 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "edit_vendor",
+    annotations: { title: "Edit QuickBooks vendor", ...EDIT },
+    description: "Modify an existing vendor with a sparse update: only the fields passed change, and a partial bill_address is merged over the stored address. Set active=false to deactivate the vendor (QuickBooks' equivalent of delete). Draft is the default: draft=true shows each changed field before and after; set draft=false to apply. Read vendors with the query tool (SELECT * FROM Vendor WHERE ...).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The vendor ID to edit",
+        },
+        display_name: {
+          type: "string",
+          description: "New display name (must be unique across customers, vendors and employees in QuickBooks)",
+        },
+        title: {
+          type: "string",
+          description: "New contact title, e.g., 'Ms.'",
+        },
+        given_name: {
+          type: "string",
+          description: "New first/given name",
+        },
+        middle_name: {
+          type: "string",
+          description: "New middle name",
+        },
+        family_name: {
+          type: "string",
+          description: "New last/family name",
+        },
+        suffix: {
+          type: "string",
+          description: "New name suffix, e.g., 'Jr.'",
+        },
+        company_name: {
+          type: "string",
+          description: "New company name",
+        },
+        email: {
+          type: "string",
+          description: "New primary email address",
+        },
+        phone: {
+          type: "string",
+          description: "New primary phone number",
+        },
+        mobile: {
+          type: "string",
+          description: "New mobile phone number",
+        },
+        bill_address: addressSchema("Billing address fields to change; fields not given keep their stored values"),
+        print_on_check_name: {
+          type: "string",
+          description: "New name to print on checks",
+        },
+        acct_num: {
+          type: "string",
+          description: "New account number the vendor uses for this company",
+        },
+        sales_term_ref: {
+          type: "string",
+          description: "New default payment terms name (e.g., 'Net 30'). Auto-resolved to ID.",
+        },
+        vendor_1099: {
+          type: "boolean",
+          description: "Whether to track this vendor for 1099 reporting",
+        },
+        active: {
+          type: "boolean",
+          description: "Set to false to deactivate the vendor (QuickBooks equivalent of delete)",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, show a before/after preview without saving (default: true)",
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
     name: "upload_attachment",
+    annotations: { title: "Upload QuickBooks attachment", ...CREATE },
     description: "WRITE: Upload a file (PDF, image, spreadsheet, etc.) and attach it to one or more transactions or entities. Draft is the default: draft=true previews the upload and any same-named file already on a target; set draft=false to upload. Provide the file as file_path (stdio only; a path on the machine running the server) or as file_content_base64 with file_name (required over HTTP). Over HTTP the base64 payload passes through the model's context and Lambda's 6 MB request limit applies, so the file can be at most about 4.4 MB. QuickBooks accepts files up to 100 MB. Returns the new attachment id.",
     inputSchema: {
       type: "object",
@@ -2259,6 +2417,7 @@ export const toolDefinitions = [
   },
   {
     name: "create_attachment_note",
+    annotations: { title: "Create QuickBooks attachment note", ...CREATE },
     description: "WRITE: Attach a text note (no file) to one or more transactions or entities. Draft is the default: draft=true previews the note; set draft=false to create it. Returns the new attachment id.",
     inputSchema: {
       type: "object",
@@ -2303,6 +2462,7 @@ export const toolDefinitions = [
   },
   {
     name: "get_attachment",
+    annotations: { title: "Get QuickBooks attachment", ...READ },
     description: "Read one attachment by ID: file name, size, note, category, what it is linked to, and a temporary download URL. Set download=true (or save_to) to save the file locally in stdio mode. Read-only; to change an attachment use edit_attachment.",
     inputSchema: {
       type: "object",
@@ -2325,6 +2485,7 @@ export const toolDefinitions = [
   },
   {
     name: "list_attachments",
+    annotations: { title: "List QuickBooks attachments", ...READ },
     description: "List the attachments linked to one transaction or entity. Read-only. For other Attachable searches (by file name, category, and so on), use the query tool.",
     inputSchema: {
       type: "object",
@@ -2343,6 +2504,7 @@ export const toolDefinitions = [
   },
   {
     name: "edit_attachment",
+    annotations: { title: "Edit QuickBooks attachment", ...EDIT },
     description: "WRITE: Edit an attachment's note, category or file name, and add, remove or re-flag its links. Draft is the default: draft=true shows the attachment before and after; set draft=false to apply. To delete an attachment use delete_entity with entity_type attachable. Returns the attachment id.",
     inputSchema: {
       type: "object",

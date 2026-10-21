@@ -104,6 +104,7 @@ declare module "node-quickbooks" {
     getInvoice(id: string, callback: Callback<unknown>): void;
     getDeposit(id: string, callback: Callback<unknown>): void;
     getCustomer(id: string, callback: Callback<unknown>): void;
+    getVendor(id: string, callback: Callback<unknown>): void;
     getVendorCredit(id: string, callback: Callback<unknown>): void;
     getBillPayment(id: string, callback: Callback<unknown>): void;
 
@@ -115,6 +116,7 @@ declare module "node-quickbooks" {
     updateInvoice(invoice: object, callback: Callback<unknown>): void;
     updateDeposit(deposit: object, callback: Callback<unknown>): void;
     updateCustomer(customer: object, callback: Callback<unknown>): void;
+    updateVendor(vendor: object, callback: Callback<unknown>): void;
     updateVendorCredit(vendorCredit: object, callback: Callback<unknown>): void;
     updateBillPayment(billPayment: object, callback: Callback<unknown>): void;
 
