@@ -22,7 +22,7 @@
   "scripts": {
     "build": "tsc",
     "test": "tsc -p tsconfig.test.json && node --enable-source-maps --test \"dist-test/tests/**/*.test.js\"",
-    "build:lambda": "esbuild src/lambda.ts --bundle --platform=node --target=node22 --outfile=dist-lambda/handler.mjs --format=esm --external:@aws-sdk/* --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
+    "build:lambda": "esbuild src/lambda.ts --bundle --platform=node --target=node22 --outfile=dist-lambda/handler.mjs --format=esm --external:@aws-sdk/* --external:koffi --banner:js='import { createRequire } from \"module\"; const require = createRequire(import.meta.url);'",
     "prepare": "npm run build",
     "start": "node dist/index.js",
     "dev": "tsc --watch"
@@ -41,6 +41,7 @@
     "dotenv": "^17.2.3",
     "intuit-oauth": "^4.2.2",
     "jose": "^6.1.0",
+    "koffi": "^3.3.3",
     "node-quickbooks": "^2.0.47",
     "tmp": "^0.2.3"
   },

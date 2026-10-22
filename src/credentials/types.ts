@@ -23,9 +23,17 @@ export interface CredentialProvider {
   getCredentials(): Promise<QBCredentials>;
 
   /**
-   * Save updated credentials (e.g., after token refresh)
+   * Credentials with a usable access token, refreshing through `refresh` when
+   * this provider's policy says so. `force` names an access token the API just
+   * rejected, so the provider refreshes even if the token looks unexpired.
    */
-  saveCredentials(credentials: QBCredentials): Promise<void>;
+  getFreshCredentials(refresh: TokenRefresher, force?: { rejectedAccessToken: string }): Promise<QBCredentials>;
+
+  /**
+   * Save updated credentials (e.g., after an OAuth exchange). `expiresIn` is the
+   * access token's lifetime in seconds, for providers that track expiry.
+   */
+  saveCredentials(credentials: QBCredentials, expiresIn?: number): Promise<void>;
 
   /**
    * Get the QuickBooks company/realm ID
@@ -54,3 +62,19 @@ export function getCredentialMode(): CredentialMode {
   }
   return "local";
 }
+
+/**
+ * Tokens returned by an OAuth refresh. `expires_in` is the access token's
+ * lifetime in seconds; it is optional because not every caller knows it.
+ */
+export interface TokenSet {
+  access_token: string;
+  refresh_token: string;
+  expires_in?: number;
+}
+
+/**
+ * Exchanges the current credentials' refresh token for new tokens. Providers
+ * call it when their refresh policy decides a refresh is due.
+ */
+export type TokenRefresher = (current: QBCredentials) => Promise<TokenSet>;

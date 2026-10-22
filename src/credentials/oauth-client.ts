@@ -1,7 +1,7 @@
 // OAuth client wrapper for QuickBooks authentication
 
 import OAuthClient from "intuit-oauth";
-import type { QBCredentials } from "./types.js";
+import type { QBCredentials, TokenSet } from "./types.js";
 
 // Intuit's OAuth Playground redirect URL - works for both sandbox and production
 const PLAYGROUND_REDIRECT_URL = "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl";
@@ -45,6 +45,8 @@ export function generateAuthorizationUrl(clientId: string, clientSecret: string)
 export interface TokenExchangeResult {
   credentials: QBCredentials;
   companyId: string;
+  /** Access token lifetime in seconds; omitted when intuit-oauth does not report one */
+  expiresIn?: number;
 }
 
 /**
@@ -77,13 +79,14 @@ export async function exchangeCodeForTokens(
   return {
     credentials,
     companyId: realmId,
+    ...(token.expires_in ? { expiresIn: token.expires_in } : {}),
   };
 }
 
 /**
  * Refresh access token using a refresh token
  */
-export async function refreshAccessToken(credentials: QBCredentials): Promise<QBCredentials> {
+export async function refreshAccessToken(credentials: QBCredentials): Promise<TokenSet> {
   const oauthClient = createOAuthClient(credentials.client_id, credentials.client_secret);
 
   // Set the current refresh token
@@ -97,9 +100,9 @@ export async function refreshAccessToken(credentials: QBCredentials): Promise<QB
   const token = authResponse.getToken();
 
   return {
-    ...credentials,
     access_token: token.access_token,
     refresh_token: token.refresh_token,
+    ...(token.expires_in ? { expires_in: token.expires_in } : {}),
   };
 }
 

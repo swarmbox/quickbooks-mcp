@@ -3,10 +3,37 @@
 import { promises as fs } from "fs";
 import { homedir } from "os";
 import { join, dirname } from "path";
-import type { CredentialProvider, QBCredentials } from "./types.js";
+import {
+  isAccessTokenFresh,
+  readKeyfile,
+  withKeyfileLock,
+  withTokens,
+  writeKeyfileAtomic,
+  type KeyfileData,
+} from "./keyfile.js";
+import type { CredentialProvider, QBCredentials, TokenRefresher } from "./types.js";
 
 // Default credential file location
 const DEFAULT_CREDENTIAL_PATH = join(homedir(), ".quickbooks-mcp", "credentials.json");
+
+const DEFAULT_REDIRECT_URL = "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl";
+
+/**
+ * The typed credentials a raw keyfile stands for. Env QBO_CLIENT_ID and
+ * QBO_CLIENT_SECRET take precedence over the file and redirect_url gets its
+ * default, both in memory only: nothing here is ever written back, so env
+ * secrets stay out of the keyfile.
+ */
+function view(raw: KeyfileData): QBCredentials {
+  return {
+    client_id: process.env.QBO_CLIENT_ID || (raw.client_id as string),
+    client_secret: process.env.QBO_CLIENT_SECRET || (raw.client_secret as string),
+    redirect_url: (raw.redirect_url as string) || DEFAULT_REDIRECT_URL,
+    access_token: raw.access_token as string,
+    refresh_token: raw.refresh_token as string,
+    company_id: raw.company_id as string | undefined,
+  };
+}
 
 /**
  * Expand a leading ~ to the user's home directory.
@@ -48,43 +75,89 @@ export class LocalCredentialProvider implements CredentialProvider {
   }
 
   async getCredentials(): Promise<QBCredentials> {
-    try {
-      const content = await fs.readFile(this.credentialPath, "utf-8");
-      const stored = JSON.parse(content);
-
-      // Merge with environment variables (env vars take precedence for client credentials)
-      const credentials: QBCredentials = {
-        client_id: process.env.QBO_CLIENT_ID || stored.client_id,
-        client_secret: process.env.QBO_CLIENT_SECRET || stored.client_secret,
-        redirect_url: stored.redirect_url || "https://developer.intuit.com/v2/OAuth2Playground/RedirectUrl",
-        access_token: stored.access_token,
-        refresh_token: stored.refresh_token,
-        company_id: stored.company_id,
-      };
-
-      return credentials;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        throw new Error(
-          `Credentials file not found at ${this.credentialPath}. ` +
-            "Run qbo_authenticate to set up OAuth credentials."
-        );
-      }
-      throw error;
-    }
+    return view(await readKeyfile(this.credentialPath));
   }
 
-  async saveCredentials(credentials: QBCredentials): Promise<void> {
-    // Ensure directory exists
-    const dir = dirname(this.credentialPath);
-    await fs.mkdir(dir, { recursive: true });
+  /**
+   * Return credentials whose access token is usable, refreshing at most once
+   * across every process that shares the keyfile:
+   *
+   * 1. Read without the lock. This is safe because every writer replaces the
+   *    keyfile by atomic rename, so the read sees a whole file, old or new. A
+   *    fresh token with no `force` returns here, so the common case never waits.
+   * 2. Otherwise take the keyfile lock and re-read. Another process (or another
+   *    caller in this one) may have refreshed while we waited for the lock, and
+   *    refreshing again would rotate the refresh token a second time for nothing.
+   * 3. With `force`, the API rejected `force.rejectedAccessToken`. If the file
+   *    now holds a different, fresh token, someone else already replaced it, so
+   *    return that instead of rotating a second time.
+   * 4. Otherwise call `refresh` (the only Intuit call, made under the lock) and
+   *    persist just the token fields and their expiry, keeping every other key.
+   *
+   * If Intuit issued new tokens but the write fails, the old refresh token in
+   * the file may already be revoked, so the error says to re-authenticate.
+   */
+  async getFreshCredentials(
+    refresh: TokenRefresher,
+    force?: { rejectedAccessToken: string },
+  ): Promise<QBCredentials> {
+    const path = this.credentialPath;
+    const unlocked = await readKeyfile(path);
+    if (!force && isAccessTokenFresh(unlocked)) return view(unlocked);
 
-    // Write credentials file
-    await fs.writeFile(
-      this.credentialPath,
-      JSON.stringify(credentials, null, 2),
-      { mode: 0o600 } // Readable only by owner
-    );
+    return withKeyfileLock(path, async () => {
+      const raw = await readKeyfile(path);
+      const rotatedByOther = force !== undefined && raw.access_token !== force.rejectedAccessToken;
+      if (isAccessTokenFresh(raw) && (!force || rotatedByOther)) return view(raw);
+
+      const updated = withTokens(raw, await refresh(view(raw)));
+      try {
+        await writeKeyfileAtomic(path, updated);
+      } catch (error) {
+        // Only the errno code: the message carries the path, never a token value.
+        const code = (error as NodeJS.ErrnoException).code ?? "unknown error";
+        throw new Error(
+          `Intuit issued a new refresh token but saving it to ${path} failed (${code}); ` +
+            "the keyfile still holds the old token, so re-run qbo_authenticate",
+        );
+      }
+      return view(updated);
+    });
+  }
+
+  /**
+   * Merge `credentials` into the keyfile under the lock and record the access
+   * token's expiry from `expiresIn` (seconds), or drop it when unknown. Keys
+   * this provider doesn't know survive; a missing or unreadable keyfile is
+   * replaced, so re-authorizing repairs a corrupt one.
+   */
+  async saveCredentials(credentials: QBCredentials, expiresIn?: number): Promise<void> {
+    const path = this.credentialPath;
+    // The directory must exist before the lock file can be created in it.
+    await fs.mkdir(dirname(path), { recursive: true });
+
+    await withKeyfileLock(path, async () => {
+      let base: KeyfileData;
+      try {
+        base = await readKeyfile(path);
+      } catch {
+        base = {};
+      }
+
+      const overlay: KeyfileData = { ...base };
+      for (const key of ["client_id", "client_secret", "redirect_url", "company_id"] as const) {
+        if (credentials[key] !== undefined) overlay[key] = credentials[key];
+      }
+
+      await writeKeyfileAtomic(
+        path,
+        withTokens(overlay, {
+          access_token: credentials.access_token,
+          refresh_token: credentials.refresh_token,
+          expires_in: expiresIn,
+        }),
+      );
+    });
   }
 
   async getCompanyId(): Promise<string> {
