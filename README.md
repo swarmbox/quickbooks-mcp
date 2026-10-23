@@ -279,7 +279,7 @@ QBO_INLINE_OUTPUT=true
 | `QBO_CREDENTIAL_MODE` | `local` | Credential storage: `local` or `aws` |
 | `QBO_CLIENT_ID` | - | QuickBooks app Client ID (local mode) |
 | `QBO_CLIENT_SECRET` | - | QuickBooks app Client Secret (local mode) |
-| `QBO_CREDENTIAL_FILE` | `~/.quickbooks-mcp/credentials.json` | Custom credential file path. A leading `~` is expanded to your home directory, so it works in an MCP client's JSON `env` block where no shell is present to expand it. |
+| `QBO_CREDENTIAL_FILE` | `~/.quickbooks-mcp/credentials.json` | Custom credential file path. A leading `~` is expanded to your home directory, so it works in an MCP client's JSON `env` block where no shell is present to expand it. Refreshes lock the sibling `<file>.lock`, and the file records `access_token_expires_at` so the server knows when a refresh is due. |
 | `QBO_INLINE_OUTPUT` | `false` | Return responses inline instead of writing to `/tmp` files. Required when using Claude Desktop or plugin environments where file-based output is not accessible to the model. |
 | `QBO_SANDBOX` | `false` | Use QuickBooks sandbox environment. Also switches the "View in QuickBooks" deep links to `app.sandbox.qbo.intuit.com` so they cannot open the production company. |
 | `AWS_REGION` | `us-east-2` | AWS region (aws mode) |
@@ -412,7 +412,12 @@ tools report no change instead of success.
 
 ## Token Refresh
 
-The server automatically refreshes OAuth tokens on each request and persists them back to your credential store (local file or AWS Secrets Manager).
+The server refreshes OAuth tokens as needed and persists them back to your credential store (local file or AWS Secrets Manager).
+
+- **Local mode** refreshes only when the access token is within 5 minutes of the `access_token_expires_at` recorded in the credential file, plus once after an auth error. **AWS mode** still refreshes on each request.
+- **Locking.** Every local refresh holds an exclusive `flock` on `<credential file>.lock`, so a script or another server instance that honors the same lock can share the credential file without racing on Intuit's rotating refresh token. The lock file is never deleted.
+- **Atomic writes.** The credential file is written to a 0600 temp file and renamed into place, so a crash never leaves a half-written file.
+- **Platforms.** Locking is supported on macOS, Linux (glibc) and FreeBSD. Other platforms refuse to refresh rather than refresh without the lock (fail closed).
 
 ---
 
@@ -448,6 +453,14 @@ Authorization codes are only valid for a few minutes. Start the OAuth flow again
 - Check that your refresh token hasn't expired (~100 days)
 - Verify your client credentials are correct
 - Try re-authenticating with `qbo_authenticate`
+
+### "the keyfile lock is busy"
+
+Another process (a script or another server instance) held `<credential file>.lock` for the full 30 second wait because it is refreshing the token. Nothing was changed; retry shortly.
+
+### "keyfile lock unavailable"
+
+The platform doesn't support the `flock` lock (only macOS, Linux (glibc) and FreeBSD do), or the native binding failed to load. The server refuses to refresh without the lock, so run it on a supported platform or use AWS mode.
 
 ### AWS credential errors
 

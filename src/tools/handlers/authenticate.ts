@@ -97,7 +97,7 @@ export async function handleAuthenticate(args: AuthenticateArgs): Promise<ToolRe
       );
 
       // Save credentials to local file
-      await localProvider.saveCredentials(result.credentials);
+      await localProvider.saveCredentials(result.credentials, result.expiresIn);
 
       return {
         content: [{

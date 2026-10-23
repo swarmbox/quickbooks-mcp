@@ -6,7 +6,7 @@ import {
   PutSecretValueCommand,
 } from "@aws-sdk/client-secrets-manager";
 import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm";
-import type { CredentialProvider, QBCredentials } from "./types.js";
+import type { CredentialProvider, QBCredentials, TokenRefresher } from "./types.js";
 
 // Configuration from environment variables with sensible defaults
 const REGION = process.env.AWS_REGION || "us-east-2";
@@ -38,7 +38,22 @@ export class AWSCredentialProvider implements CredentialProvider {
     return JSON.parse(response.SecretString) as QBCredentials;
   }
 
-  async saveCredentials(credentials: QBCredentials): Promise<void> {
+  /**
+   * Always refresh, as this provider always has: read the secret, refresh, and
+   * save the new tokens back. `force` is ignored (every call refreshes anyway)
+   * and no lock is taken.
+   */
+  async getFreshCredentials(refresh: TokenRefresher): Promise<QBCredentials> {
+    const credentials = await this.getCredentials();
+    const tokens = await refresh(credentials);
+    credentials.access_token = tokens.access_token;
+    credentials.refresh_token = tokens.refresh_token;
+    await this.saveCredentials(credentials);
+    return credentials;
+  }
+
+  // `expiresIn` is ignored, so the secret's shape is unchanged.
+  async saveCredentials(credentials: QBCredentials, _expiresIn?: number): Promise<void> {
     const command = new PutSecretValueCommand({
       SecretId: SECRET_NAME,
       SecretString: JSON.stringify(credentials),

@@ -177,6 +177,7 @@ column would otherwise have hidden per-department values entirely.
 | API client | `src/client/quickbooks.ts` |
 | Entities node-quickbooks doesn't wrap | `src/client/rest.ts` |
 | Output mode (stdio/http) | `src/utils/output.ts` |
+| Local keyfile lock, atomic write, token freshness | `src/credentials/keyfile.ts` |
 
 ## Critical Limitations
 
