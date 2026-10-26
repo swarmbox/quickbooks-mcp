@@ -27,6 +27,11 @@ const LOOKUP_CACHE_TTL_MS = 15 * 60 * 1000;
 let departmentCache: DepartmentCache | null = null;
 let classCache: ClassCache | null = null;
 let accountCache: AccountCache | null = null;
+// Bumped by invalidateAccountCache and clearLookupCache, never reset. Same guard
+// as vendorCacheGeneration: getAccountCache stores a load only if the generation
+// is unchanged since the load began, so a load in flight across either event
+// cannot put a pre-write listing back.
+let accountCacheGeneration = 0;
 let vendorCache: VendorCache | null = null;
 // Bumped by rememberVendor and clearLookupCache, never reset. getVendorCache
 // stores a load only if the generation is unchanged since the load began, so a
@@ -45,6 +50,7 @@ export function clearLookupCache(): void {
   departmentCache = null;
   classCache = null;
   accountCache = null;
+  accountCacheGeneration++;
   vendorCache = null;
   vendorCacheGeneration++;
   employeeCache = null;
@@ -110,6 +116,7 @@ export async function getAccountCache(client: QuickBooks): Promise<AccountCache>
     return accountCache;
   }
 
+  const generation = accountCacheGeneration;
   const result = await promisify<unknown>((cb) => client.findAccounts({ fetchAll: true }, cb));
   const items = extractQueryResults<CachedAccount>(result, 'Account');
 
@@ -124,8 +131,44 @@ export async function getAccountCache(client: QuickBooks): Promise<AccountCache>
     }
   }
 
-  accountCache = { items, byId, byName, byAcctNum, fetchedAt: Date.now() };
-  return accountCache;
+  const loaded: AccountCache = { items, byId, byName, byAcctNum, fetchedAt: Date.now() };
+  // An invalidateAccountCache or clearLookupCache ran while this load was in
+  // flight, so its listing may predate that change: return it, don't store it.
+  if (generation === accountCacheGeneration) accountCache = loaded;
+  return loaded;
+}
+
+/**
+ * Every account, inactive ones included.
+ *
+ * A default Account query lists active accounts only, so the account cache can
+ * never answer for an inactive account: list_accounts(active_only: false) could
+ * not return one, and an account write has to see inactive accounts to resolve a
+ * reactivation and to check names and numbers. Unlike getAccountCache this is
+ * not cached, so each caller checks against the books as they are now.
+ */
+export async function loadAllAccounts(client: QuickBooks): Promise<CachedAccount[]> {
+  const result = await promisify<unknown>((cb) =>
+    client.findAccounts({ fetchAll: true, Active: [true, false] }, cb)
+  );
+  return extractQueryResults<CachedAccount>(result, 'Account');
+}
+
+/**
+ * Drop the loaded account cache after a committed account write.
+ *
+ * A parent rename rewrites every child's FullyQualifiedName and a deactivation
+ * cascades to every descendant, so one write changes many entries and other
+ * handlers hold the cache across awaits. The cache is dropped rather than
+ * patched in place (as rememberVendor does for its single-entry changes); the
+ * next getAccountCache reloads. Handlers keep the copy they already hold.
+ *
+ * Bumping the generation guards a getAccountCache load that began before the
+ * write and finishes after it from storing a listing that predates it.
+ */
+export function invalidateAccountCache(): void {
+  accountCache = null;
+  accountCacheGeneration++;
 }
 
 // Resolve account by name, AcctNum, or ID using cache

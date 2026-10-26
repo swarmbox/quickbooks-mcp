@@ -22,8 +22,10 @@ export interface ToolSchema {
 /**
  * Keys an `edit_*` tool accepts that do not, by themselves, change anything:
  * they address the record or control the write rather than describe an edit.
+ * `account` is edit_account's address (an Id, number, name or path); no other
+ * `edit_*` tool declares it.
  */
-const NON_MUTATING_EDIT_KEYS = new Set(["id", "draft", "confirm", "expected_total"]);
+const NON_MUTATING_EDIT_KEYS = new Set(["id", "account", "draft", "confirm", "expected_total"]);
 
 export class ToolArgumentError extends Error {
   constructor(message: string) {

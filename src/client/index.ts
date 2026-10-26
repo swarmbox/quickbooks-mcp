@@ -16,6 +16,8 @@ export {
   getDepartmentCache,
   getClassCache,
   getAccountCache,
+  loadAllAccounts,
+  invalidateAccountCache,
   getVendorCache,
   rememberVendor,
   getTermCache,

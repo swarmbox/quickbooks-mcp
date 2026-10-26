@@ -6,14 +6,20 @@
  * the stored record and found no difference. Saying "updated successfully"
  * there reads as a change that never happened, which is exactly how a no-op
  * edit gets mistaken for a correction.
+ *
+ * `qboUrl` is optional for entities with no confirmed QuickBooks route (Account):
+ * without one the "View in QuickBooks" line is left out rather than pointing
+ * somewhere wrong.
  */
 export function formatUpdateResult(
   label: string,
   id: string,
   previousSyncToken: string | undefined,
   newSyncToken: string | undefined,
-  qboUrl: string
+  qboUrl?: string
 ): string {
+  const link = qboUrl === undefined ? [] : [`View in QuickBooks: ${qboUrl}`];
+
   const unchanged =
     previousSyncToken !== undefined &&
     newSyncToken !== undefined &&
@@ -24,13 +30,13 @@ export function formatUpdateResult(
       `${label} ${id}: no change.`,
       `QuickBooks accepted the update but the SyncToken did not advance (still ${newSyncToken}),`,
       "which means nothing in the payload differed from the stored record.",
-      `View in QuickBooks: ${qboUrl}`,
+      ...link,
     ].join("\n");
   }
 
   return [
     `${label} ${id} updated successfully.`,
     `New SyncToken: ${newSyncToken}`,
-    `View in QuickBooks: ${qboUrl}`,
+    ...link,
   ].join("\n");
 }

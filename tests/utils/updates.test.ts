@@ -26,4 +26,16 @@ describe("formatUpdateResult", () => {
     assert.match(formatUpdateResult("Bill", "1", undefined, "4", URL), /updated successfully/);
     assert.match(formatUpdateResult("Bill", "1", "3", undefined, URL), /updated successfully/);
   });
+
+  // Account updates have no confirmed QuickBooks route, so they pass no URL and
+  // the link line is left out rather than pointing somewhere wrong.
+  it("update-result-without-url — without a URL the result has no link line", () => {
+    const changed = formatUpdateResult("Account", "10", "3", "4");
+    const unchanged = formatUpdateResult("Account", "10", "4", "4");
+
+    assert.equal(changed, "Account 10 updated successfully.\nNew SyncToken: 4");
+    assert.ok(unchanged.includes("Account 10: no change."), unchanged);
+    assert.ok(!changed.includes("View in QuickBooks"), changed);
+    assert.ok(!unchanged.includes("View in QuickBooks"), unchanged);
+  });
 });

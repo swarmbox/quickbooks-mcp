@@ -1,7 +1,7 @@
 // Handler for list_accounts tool
 
 import QuickBooks from "node-quickbooks";
-import { getAccountCache } from "../../client/index.js";
+import { getAccountCache, loadAllAccounts } from "../../client/index.js";
 import { toCents, formatDollars, sumCents, outputReport } from "../../utils/index.js";
 
 export async function handleListAccounts(
@@ -10,12 +10,13 @@ export async function handleListAccounts(
 ): Promise<{ content: Array<{ type: string; text: string }> }> {
   const { account_type, active_only = true } = args;
 
-  // Use the account cache (fetches all accounts with pagination)
-  const cache = await getAccountCache(client);
+  // The account cache holds active accounts only (a default query), so inactive
+  // ones need a full listing. Both fetch every account with pagination.
+  let accounts = active_only
+    ? (await getAccountCache(client)).items
+    : await loadAllAccounts(client);
 
   // Apply filters client-side
-  let accounts = cache.items;
-
   if (active_only) {
     accounts = accounts.filter(a => a.Active !== false);
   }

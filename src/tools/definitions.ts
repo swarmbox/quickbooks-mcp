@@ -2352,6 +2352,96 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "create_account",
+    annotations: { title: "Create QuickBooks account", ...CREATE },
+    description: "Create an account in the chart of accounts, draft first: the default call validates and previews without writing, and draft=false creates it. Account names must be unique among siblings (accounts under the same parent, or all top-level accounts), ignoring case; an inactive account still reserves its original name, and the same name under a different parent is fine. A sub-account takes its parent's account type. An account number held by an active account is refused. Every refusal names the account that causes it, and nothing is written unless every check passes. The tool applies no naming convention: the name is used as given (trimmed). No QuickBooks link is returned.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "Account name, trimmed. At most 100 characters, no colon or tab. Must be unique among siblings, inactive ones included.",
+        },
+        account_type: {
+          type: "string",
+          description: "QuickBooks account type, e.g., 'Expense', 'Bank', 'Income' (account_type or account_subtype is required). With a parent it defaults to the parent's type, and a different type is refused.",
+        },
+        account_subtype: {
+          type: "string",
+          description: "QuickBooks account subtype, e.g., 'Utilities' (account_type or account_subtype is required). A subtype alone infers the type; a type alone gets QuickBooks' default subtype; a type and subtype that don't match are refused by QuickBooks.",
+        },
+        acct_num: {
+          type: "string",
+          description: "Account number (optional). Refused when an active account already uses it.",
+        },
+        description: {
+          type: "string",
+          description: "Account description (optional, at most 100 characters)",
+        },
+        parent: {
+          type: "string",
+          description: "Parent account for a sub-account (optional): an exact Id, account number, name or Parent:Child path, with no partial match. An ambiguous name is refused with its candidates listed; an inactive parent is refused.",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, validate and show preview without creating (default: true)",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "edit_account",
+    annotations: { title: "Edit QuickBooks account", ...EDIT },
+    description: "Edit an account in the chart of accounts, draft first: the default call checks the edit and previews each changed field as before → after without writing, and draft=false applies it. Rename, renumber, change the description, change the type and subtype, move under another parent or to the top level, deactivate or reactivate. Every check runs against the current chart before anything is written, and every refusal names the account that causes it. Deactivation (active=false) must be the only change in its edit; it cascades to every sub-account (the preview lists them), and it is refused while any balance-sheet account in the subtree carries a balance, because deactivating such an account takes the balance off the books: move the balance out first with a journal entry or transfer. An inactive account accepts only a reactivation (active=true, optionally with a name); reactivation leaves its sub-accounts inactive, is refused while its parent is inactive, and QuickBooks may give the reactivated account a \"-1\" name suffix when an active account at its level now uses its name. No QuickBooks link is returned.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        account: {
+          type: "string",
+          description: "The account to edit: an exact Id, account number, name or Parent:Child path, with no partial match. An inactive account also matches by its name without \" (deleted)\". An ambiguous reference is refused with its candidates listed.",
+        },
+        name: {
+          type: "string",
+          description: "New name, trimmed. Must not be blank; at most 100 characters, no colon or tab. Must be unique among the active accounts at its level.",
+        },
+        acct_num: {
+          type: "string",
+          description: "New account number; \"\" clears it. Refused when another active account uses it.",
+        },
+        description: {
+          type: "string",
+          description: "New description (at most 100 characters); \"\" clears it.",
+        },
+        account_type: {
+          type: "string",
+          description: "New account type, e.g., 'Other Expense'. A changed type requires account_subtype, because the stored subtype belongs to the old type. Refused while the account has active sub-accounts or carries a balance; a sub-account must keep its parent's type.",
+        },
+        account_subtype: {
+          type: "string",
+          description: "New account subtype. Always sent with a type: given alone it is paired with the stored type, so it never changes the type.",
+        },
+        parent: {
+          type: "string",
+          description: "Move under this account: an exact reference, as for account. It must be active, of the same type, and not the account itself or one of its sub-accounts, and the name must be free there. Cannot be combined with top_level.",
+        },
+        top_level: {
+          type: "boolean",
+          description: "true moves a sub-account to the top level (the name must be free there). Cannot be combined with parent.",
+        },
+        active: {
+          type: "boolean",
+          description: "false deactivates (QuickBooks' equivalent of delete) and must be the only change; it cascades to every sub-account and is refused while any balance-sheet account in the subtree carries a balance. true reactivates an inactive account, optionally with a name; its sub-accounts stay inactive.",
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, show a before/after preview without saving (default: true)",
+        },
+      },
+      required: ["account"],
+    },
+  },
+  {
     name: "upload_attachment",
     annotations: { title: "Upload QuickBooks attachment", ...CREATE },
     description: "WRITE: Upload a file (PDF, image, spreadsheet, etc.) and attach it to one or more transactions or entities. Draft is the default: draft=true previews the upload and any same-named file already on a target; set draft=false to upload. Provide the file as file_path (stdio only; a path on the machine running the server) or as file_content_base64 with file_name (required over HTTP). Over HTTP the base64 payload passes through the model's context and Lambda's 6 MB request limit applies, so the file can be at most about 4.4 MB. QuickBooks accepts files up to 100 MB. Returns the new attachment id.",

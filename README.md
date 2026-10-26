@@ -298,7 +298,7 @@ QBO_INLINE_OUTPUT=true
 | `get_preferences` | Get company preferences, led by the books closing date (or "none set"), with a digest of accounting, currency, sales and purchase settings |
 | **Query & Reports** | |
 | `query` | Run SQL-like queries against any QuickBooks entity |
-| `list_accounts` | List chart of accounts with filtering |
+| `list_accounts` | List chart of accounts with filtering; `active_only: false` includes inactive accounts |
 | `get_profit_loss` | Profit & Loss report (by month, department, class, etc.) |
 | `get_balance_sheet` | Balance Sheet report |
 | `get_trial_balance` | Trial Balance report (`flags: true` adds a close-review pass for wrong-side and uncategorized/suspense balances) |
@@ -339,6 +339,9 @@ QBO_INLINE_OUTPUT=true
 | `receive_payment` | Record a customer payment against open invoices (A/R counterpart to `create_bill_payment`); each line defaults to the invoice's open balance |
 | `create_transfer` | Move money between two of the company's own accounts (bank↔bank, credit-card paydown) |
 | `get_bill_payment` | Fetch a bill payment by ID; signs each linked transaction by side (credit/charge) and flags unapplied amounts |
+| **Accounts** | |
+| `create_account` | Create an account or sub-account (`account_type` and/or `account_subtype`, `acct_num`, `description`, `parent`); draft-first. A sub-account takes its parent's type, and another type is refused. Names are unique among siblings (an inactive sibling still reserves its name), and a number an active account holds is refused, before any write |
+| `edit_account` | Sparse-update an account by exact Id, number, name or `Parent:Child` path: name, number, description, type and subtype (always sent as a pair), `parent` to move it or `top_level: true` to move it to the top level. `active: false` deactivates it and cascades to every sub-account; it is refused while any balance-sheet account in the subtree carries a balance. `active: true` reactivates it alone, leaving its sub-accounts inactive |
 | **Customers & Vendors** | |
 | `create_customer` | Create a customer or sub-customer (name parts, contact info, addresses, hierarchy via `parent_ref`, `sales_term_ref`) |
 | `get_customer` | Fetch a customer by ID with SyncToken, contact info, addresses, balance, hierarchy and active status |
