@@ -983,6 +983,145 @@ status from the update response, not from the request. The commit text adds a
   whether a rename sent with `Active: true` behaves the same when the new name
   is held is unverified.
 
+## Account Writes
+
+An Account create or update is answered by a handful of faults, and the most
+common one, `2010` "Request has invalid or unsupported property", gives no
+reason at all. Several writes are also answered OK and silently ignored, and one
+deactivation quietly takes a balance off the books.
+
+### Verified in a sandbox company (2026-10-23)
+
+Probed with invented accounts only. Every probe account was left inactive, since
+QuickBooks has no account delete.
+
+- **A create needs a type or a subtype.** With neither it fails with `2170`
+  (Invalid Enumeration). A subtype alone infers the type, and a type alone gets a
+  default subtype. A type and subtype that don't belong together are also `2170`.
+- **Names are at most 100 characters and contain no colon or tab.** A longer
+  name is `2050`; a colon or a tab is `2180`. A double quote is accepted. A
+  description is also capped at 100 characters (`2050`).
+- **A duplicate name on create is `6240`, and uniqueness is per parent.** The
+  check ignores case and trailing whitespace, whatever the type. The same name
+  under a different parent is accepted. An **inactive** account still reserves
+  its original name on create. Account names do not share a namespace with
+  vendors or items.
+- **Account numbers are reserved only by active accounts.** A create onto an
+  active account's number is `6000` "Another account is already using this
+  number."; a renumber onto one is `2010`. An inactive account keeps its number
+  but does not reserve it, so a create or renumber onto it is accepted.
+  Reactivating an account whose number an active account now holds is `2010`.
+  Eight characters were accepted on a US company with account numbers turned on.
+- **`ParentRef` alone makes a sub-account.** `SubAccount: true` without
+  `ParentRef` silently creates a top-level account. A parent of another type is
+  `6000` "same account type as their parent".
+- **`OpeningBalance` on a Bank create is accepted.** It books a Deposit against
+  Opening Balance Equity.
+- **Sparse updates work for most fields.** `Name`, `Description` (`""` clears
+  it), `AcctNum` (`""` clears it), `AccountSubType`, `ParentRef` (re-parent) and
+  `Active` all apply sparsely.
+- **`AccountType` alone is silently ignored.** It is answered OK and SyncToken
+  does not advance. Type and subtype sent together are applied, even across
+  classifications. A subtype alone that belongs to another type **changes the
+  type**.
+- **A sparse move to the top level is silently ignored.** `SubAccount: false`,
+  with or without `ParentRef: null`, is answered OK and changes nothing. A full
+  update with `ParentRef` omitted works. node-quickbooks forces `sparse: true`
+  unless the payload carries `sparse`, so a full update has to send
+  `sparse: false`.
+- **A rename onto a sibling's name is `2010` with no detail**, sparse or full
+  and in any case. A case-only self-rename is accepted. A rename onto an
+  *inactive* account's original name is accepted, unlike a create.
+- **Renaming a parent rewrites every child's `FullyQualifiedName`.**
+- **The tree refuses cycles and mixed types.** Moving a parent under its own
+  child, or under itself, is `2010`. Changing a child's type away from its
+  parent's, or re-parenting under another type, is `6000` "same account type as
+  their parent". Changing a parent's type while it has an active child is
+  `2010`.
+- **A type change on an account carrying a balance is `2010`.** Nothing changes.
+- **An inactive account accepts only a reactivation.** Any other update is
+  `2010`. A rename sent with the reactivation is applied.
+- **Deactivating renames the account `"<name> (deleted)"` and cascades.** Every
+  descendant is deactivated too. Reactivating the parent does not reactivate
+  the descendants, and reactivating a child under an inactive parent is `2010`.
+- **A rename sent with `Active: false` is silently dropped.**
+- **Reactivating while an active sibling holds the name is accepted** and the
+  account is renamed `"<name>-1"`.
+- **Deactivating an Income account that an active Item uses is `2010`.**
+- **Deactivating a balance-sheet account that has a balance takes the balance
+  off the books.** Its Trial Balance row disappears and Opening Balance Equity
+  falls by the same amount. The source Deposit is unchanged, and no JournalEntry
+  is visible through the API. Reactivating does **not** restore the balance.
+- **Deactivating a P&L account that has activity keeps its history.** The Trial
+  Balance shows it under `"<name> (deleted)"`.
+- **The default Account query is active-only.** `SELECT * FROM Account` and
+  `findAccounts` list active accounts only; inactive ones need
+  `Active IN (true, false)`. `CurrentBalance` is 0 on P&L accounts.
+
+### How create_account and edit_account use this
+
+Both tools (`src/tools/handlers/account.ts`) load a **fresh full listing**,
+inactive accounts included (`loadAllAccounts`, `Active IN (true, false)`), for
+each draft and again for each commit. The session account cache holds active
+accounts only, and a commit must never act on a stale preview or stale
+balances.
+
+Accounts are addressed by an **exact** Id, account number, name or
+`Parent:Child` path, ignoring case; an inactive account also matches by its name
+without ` (deleted)`. There is no partial match. A reference that matches more
+than one account is refused with every candidate listed.
+
+Because `2010` gives no reason, the tools **pre-check** every cause they can
+before any write, in draft and commit alike:
+
+- the name rules and the 100-character limits, before any QuickBooks call;
+- a name already used at the target level (inactive siblings count on create,
+  where QuickBooks reserves their names, and not on a rename);
+- a number an active account holds;
+- a sub-account's type must be its parent's: `create_account` defaults a
+  sub-account's type to the parent's and refuses another;
+- a type change on an account with active sub-accounts or a balance;
+- a move under itself or one of its own sub-accounts, or under an inactive
+  parent;
+- an edit to an inactive account other than a reactivation (optionally with a
+  rename), a reactivation under an inactive parent, and a reactivation onto a
+  number an active account now holds;
+- `active: false` combined with any other change, since QuickBooks drops a rename
+  sent with it.
+
+`edit_account` always sends type and subtype **as a pair**, filling an omitted
+type from the stored account so a subtype alone can never change the type, and
+refuses a changed type without a subtype. A move to the top level is a **full
+update**: the freshly read record without its `ParentRef`, with
+`SubAccount: false` and `sparse: false`. Every other edit is sparse.
+
+A deactivation walks the active subtree it will cascade to. If any
+Asset, Liability or Equity account in it carries a non-zero balance, the whole
+edit is refused, nothing is written, and the refusal lists each balance and says
+to move it out first with a journal entry or transfer. Otherwise the preview and
+the commit list every sub-account the deactivation reaches. A reactivation notes
+that sub-accounts stay inactive and that QuickBooks may suffix the name `-1`; the
+commit takes the name and status from the response.
+
+Only known faults are rewritten. A `6240` or a `6000` "already using this
+number" on create names the holder from a fresh listing. A `2010` on update is
+explained as "refused without giving a reason", followed by its known causes and
+QuickBooks' own text; the pre-checks rule out all of them except an Item using
+the account, so a `2010` is mostly a race. Every other rejection propagates
+unchanged.
+
+After every committed write the account cache is **invalidated**, not patched: a
+parent rename rewrites every child's path and a deactivation cascades.
+
+### Unverified
+
+- **Type changes on P&L accounts that have activity.** Only balance-sheet
+  balances were probed; whether QuickBooks accepts a type change on an Income or
+  Expense account with posted transactions is unverified.
+- **AcctNum limits outside the US.** Only a US company with account numbers
+  turned on was probed; other regions may allow different lengths or
+  characters.
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)

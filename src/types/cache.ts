@@ -13,6 +13,7 @@ export interface CachedAccount {
   AcctNum?: string;
   AccountType?: string;
   AccountSubType?: string;
+  Description?: string;
   // "Asset" | "Liability" | "Equity" | "Revenue" | "Expense" — the normal side of
   // an account follows from this, which is what the Trial Balance flag pass needs.
   Classification?: string;
