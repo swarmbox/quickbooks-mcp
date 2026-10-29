@@ -7,9 +7,10 @@ import { CREATE_LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
 import { addressSchema } from "../utils/address.js";
 
 // MCP tool annotations, which clients such as claude.ai and Claude Desktop use
-// to group a connector's tools into read-only and write permissions. They are
-// hints for the client, not enforcement: draft mode and confirm are what guard
-// the books. Every tool calls the QuickBooks API, so openWorldHint is true.
+// to group a connector's tools into read-only and write permissions. Most are
+// hints for the client; readOnlyHint also gates QBO_READ_ONLY (see
+// src/tools/access.ts). In full mode, draft mode and confirm are what guard the
+// books. Every tool calls the QuickBooks API, so openWorldHint is true.
 //
 //   READ        reads only; repeating it changes nothing.
 //   CREATE      adds a record (draft-by-default tools are still writes); a

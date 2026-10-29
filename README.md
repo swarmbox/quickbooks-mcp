@@ -23,7 +23,7 @@ This is the only QuickBooks MCP server with report tools. Pull a P&L, Balance Sh
 
 ### Safe by default
 
-Every create and edit operation defaults to **draft/preview mode**. You see exactly what will be written to your books before committing. No accidental journal entries or misclassified expenses.
+Every create and edit operation defaults to **draft/preview mode**. You see exactly what will be written to your books before committing. No accidental journal entries or misclassified expenses. For projects that should never write, see [Read-only mode](#read-only-mode).
 
 ### One query tool instead of dozens
 
@@ -272,6 +272,37 @@ QBO_INLINE_OUTPUT=true
 
 ---
 
+## Read-only mode
+
+Set `QBO_READ_ONLY=true` to expose only the tools that cannot change QuickBooks data. Write tools are removed from the tool list, and calling one anyway returns `Tool <name> is not available: disabled by QBO_READ_ONLY`. `qbo_authenticate` stays available because it only stores local OAuth credentials, which a read-only project still needs for first-time setup and for recovering from a rejected refresh token.
+
+To expose a narrower set, list tool names in `QBO_ENABLED_TOOLS`. Names are comma-separated and matched case-insensitively. Unknown names are ignored with a notice on stderr, and a list that leaves no tool exposed exposes none. Calling a tool outside the list returns `Tool <name> is not available: not listed in QBO_ENABLED_TOOLS`.
+
+The two variables can be used together. With `QBO_READ_ONLY` off, the allowlist can name any tool, write tools included. With it on, the allowlist only narrows the read-only tools: a write tool in the list stays hidden, a notice on stderr names it, and calling it returns `Tool <name> is not available: disabled by QBO_READ_ONLY`.
+
+`QBO_READ_ONLY` fails closed: a value other than the ones listed in the [Environment Variables](#environment-variables) table below turns read-only on and logs a notice naming the value.
+
+```json
+{
+  "mcpServers": {
+    "quickbooks": {
+      "command": "npx",
+      "args": ["-y", "quickbooks-mcp"],
+      "env": {
+        "QBO_CREDENTIAL_MODE": "local",
+        "QBO_READ_ONLY": "true"
+      }
+    }
+  }
+}
+```
+
+Both variables also apply to the HTTP/Lambda transport, where `qbo_authenticate` is never exposed.
+
+The read-only set follows each tool's `readOnlyHint` annotation, so new tools are classified automatically.
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -282,6 +313,8 @@ QBO_INLINE_OUTPUT=true
 | `QBO_CREDENTIAL_FILE` | `~/.quickbooks-mcp/credentials.json` | Custom credential file path. A leading `~` is expanded to your home directory, so it works in an MCP client's JSON `env` block where no shell is present to expand it. Refreshes lock the sibling `<file>.lock`, and the file records `access_token_expires_at` so the server knows when a refresh is due. |
 | `QBO_INLINE_OUTPUT` | `false` | Return responses inline instead of writing to `/tmp` files. Required when using Claude Desktop or plugin environments where file-based output is not accessible to the model. |
 | `QBO_SANDBOX` | `false` | Use QuickBooks sandbox environment. Also switches the "View in QuickBooks" deep links to `app.sandbox.qbo.intuit.com` so they cannot open the production company. |
+| `QBO_READ_ONLY` | `false` | Expose only tools that cannot change QuickBooks data. Accepts `1`/`true`/`yes`/`on` (on) and unset/empty/`0`/`false`/`no`/`off` (off), case-insensitive; any other value fails closed to on. Local re-authentication via `qbo_authenticate` stays allowed because it changes no QuickBooks data. See [Read-only mode](#read-only-mode). |
+| `QBO_ENABLED_TOOLS` | - | Comma-separated allowlist of tool names to expose (case-insensitive, e.g. `query,get_profit_loss`). Can be combined with `QBO_READ_ONLY`: with read-only on, it only narrows the read-only tools, and a listed write tool is refused as `disabled by QBO_READ_ONLY`. See [Read-only mode](#read-only-mode). |
 | `AWS_REGION` | `us-east-2` | AWS region (aws mode) |
 | `QBO_SECRET_NAME` | `prod/qbo` | Secrets Manager secret name (aws mode) |
 | `QBO_COMPANY_ID_PARAM` | `/prod/qbo/company_id` | SSM parameter path (aws mode) |

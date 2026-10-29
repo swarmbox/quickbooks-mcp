@@ -2,31 +2,29 @@
 // Deployed behind API Gateway — handles OAuth token validation and proxies
 // the OAuth authorization flow to Azure AD for MCP client compatibility.
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { setOutputMode } from "./utils/output.js";
-import { toolDefinitions, executeTool } from "./tools/index.js";
+import { toolDefinitions } from "./tools/index.js";
+import { createMcpServer } from "./server.js";
 import { getAuthConfig, validateToken } from "./auth/token-validator.js";
 
 // Set HTTP output mode at module load (before any handlers run)
 setOutputMode("http");
 
-// Filter out qbo_authenticate — not relevant for remote/Lambda usage
-const remoteToolDefinitions = toolDefinitions.filter(
-  (t) => t.name !== "qbo_authenticate"
-);
+// qbo_authenticate is withheld remotely: it works only in local credential mode,
+// pasting an OAuth code back from a browser on the machine running the server,
+// so it has no use in Lambda. Withholding always wins over QBO_ENABLED_TOOLS.
+const REMOTE_WITHHELD: ReadonlySet<string> = new Set(["qbo_authenticate"]);
 
 // The advertised list and the callable list must not diverge. Filtering
 // tools/list only changes what a caller is *told* about; the tools/call handler
-// below dispatches by name, so without this check a caller past the auth gate
-// could still invoke a tool that was deliberately withheld here. Derived from
-// remoteToolDefinitions rather than written out as a denylist, so anything
-// filtered above is automatically unreachable too.
-export const remoteToolNames = new Set(remoteToolDefinitions.map((t) => t.name));
+// dispatches by name, so createMcpServer checks every call against the same
+// exposed set, or a caller past the auth gate could still invoke a tool that
+// was deliberately withheld here. This is the remote ceiling before
+// QBO_READ_ONLY / QBO_ENABLED_TOOLS narrow it further.
+export const remoteToolNames = new Set(
+  toolDefinitions.map((t) => t.name).filter((name) => !REMOTE_WITHHELD.has(name))
+);
 
 // Load auth config once at module level (cached across warm invocations).
 // Null when MCP_AUTH_JWKS_URI / MCP_AUTH_AUDIENCE / MCP_AUTH_ISSUER are not all
@@ -70,34 +68,6 @@ const AZURE_TOKEN_URL = `${AZURE_TENANT_BASE}/oauth2/v2.0/token`;
 const MCP_SCOPE = process.env.MCP_AUTH_AUDIENCE && process.env.MCP_AUTH_SCOPE
   ? `${process.env.MCP_AUTH_AUDIENCE}/${process.env.MCP_AUTH_SCOPE}`
   : "";
-
-// Create MCP server
-function createServer(): Server {
-  const server = new Server(
-    { name: "quickbooks-mcp", version: "1.0.0" },
-    { capabilities: { tools: {} } }
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: remoteToolDefinitions,
-  }));
-
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    if (!remoteToolNames.has(name)) {
-      // Same wording executeTool uses for a name it has no handler for: over
-      // this transport the tool simply does not exist, and saying anything more
-      // specific would confirm that it does elsewhere.
-      return {
-        content: [{ type: "text", text: `Unknown tool: ${name}` }],
-        isError: true,
-      };
-    }
-    return executeTool(name, args as Record<string, unknown>);
-  });
-
-  return server;
-}
 
 // Unified event shape — handles both REST API v1 and HTTP API v2 formats
 interface APIGatewayEvent {
@@ -430,7 +400,7 @@ export async function handler(event: APIGatewayEvent): Promise<APIGatewayResult>
       }
     }
 
-    const server = createServer();
+    const server = createMcpServer({ withhold: REMOTE_WITHHELD });
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
       enableJsonResponse: true,

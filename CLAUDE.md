@@ -78,6 +78,7 @@ There is no "merge locally and push to `master`" shortcut. The PR review/merge g
 src/
 ├── index.ts           # MCP server entry point (stdio)
 ├── lambda.ts          # Lambda entry point (HTTP transport)
+├── server.ts          # Shared server factory; both entry points gate tools through it
 ├── client/            # QuickBooks API client and caching
 ├── types/             # TypeScript type definitions
 ├── utils/             # Utility functions (files, URLs, money, output)
@@ -86,6 +87,7 @@ src/
 └── tools/
     ├── definitions.ts # All tool schema definitions (single file)
     ├── index.ts       # Tool registry, handler map, auth retry dispatcher
+    ├── access.ts      # QBO_READ_ONLY / QBO_ENABLED_TOOLS resolver (pure)
     └── handlers/      # One file per tool (or per entity group)
 ```
 
@@ -132,7 +134,7 @@ Every new tool requires changes in **4 files** plus README:
 
 1. **`src/tools/handlers/<name>.ts`** — Create handler function
 2. **`src/tools/handlers/index.ts`** — Add barrel export
-3. **`src/tools/definitions.ts`** — Add tool schema (name, description, inputSchema, and `annotations`: a `title` plus one of the `READ`/`CREATE`/`EDIT`/`EDIT_LINES`/`DELETE`/`CONVERT` hint sets defined above the array; `tests/tools/annotations.test.ts` fails without them)
+3. **`src/tools/definitions.ts`** — Add tool schema (name, description, inputSchema, and `annotations`: a `title` plus one of the `READ`/`CREATE`/`EDIT`/`EDIT_LINES`/`DELETE`/`CONVERT`/`AUTH` hint sets defined above the array; `tests/tools/annotations.test.ts` fails without them; `readOnlyHint` decides whether the tool is exposed under `QBO_READ_ONLY`, so a wrong hint leaks a write tool into read-only projects. The one exception is `LOCAL_ONLY_TOOLS` in `src/tools/access.ts`.)
 4. **`src/tools/index.ts`** — Import handler + register in `toolHandlers.set()`
 5. **`README.md`** — Add row to Available Tools table
 
