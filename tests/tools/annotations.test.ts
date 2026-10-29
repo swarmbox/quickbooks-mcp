@@ -1,4 +1,4 @@
-import { describe, it } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -8,7 +8,8 @@ import { toolDefinitions } from "../../src/tools/definitions.js";
 
 // Clients group a connector's tools into read-only and write permissions by
 // these hints, so a tool without them, or with the wrong readOnlyHint, lands in
-// the wrong bucket. The HTTP transport is covered in
+// the wrong bucket. readOnlyHint now also decides which tools QBO_READ_ONLY
+// exposes. The HTTP transport is covered in
 // tests/auth/remote-tool-allowlist.test.ts.
 
 type Annotations = {
@@ -21,6 +22,28 @@ type Annotations = {
 
 const annotationsOf = (name: string): Annotations | undefined =>
   (toolDefinitions.find((t) => t.name === name) as { annotations?: Annotations } | undefined)?.annotations;
+
+// The stdio case lists every tool, so neither access variable may leak in from
+// the caller's environment.
+const ENV_KEYS = ["QBO_READ_ONLY", "QBO_ENABLED_TOOLS"] as const;
+
+let snapshot: Record<string, string | undefined> = {};
+
+beforeEach(() => {
+  snapshot = {};
+  for (const key of ENV_KEYS) {
+    snapshot[key] = process.env[key];
+    delete process.env[key];
+  }
+});
+
+afterEach(() => {
+  for (const key of ENV_KEYS) {
+    const value = snapshot[key];
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+});
 
 const WRITE_NAME = /^(create|edit|delete|receive|upload|convert)_|_authenticate$/;
 // Tools that delete a record: delete_entity, and conversions that replace one.

@@ -8,6 +8,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
 import { toolDefinitions } from "../../src/tools/index.js";
+import { isReadOnlyTool } from "../../src/tools/access.js";
 
 // src/lambda.ts advertises a filtered tool list over HTTP. Filtering tools/list
 // is not access control on its own: the tools/call handler dispatches by name,
@@ -45,6 +46,8 @@ const ENV_KEYS = [
   "MCP_AUTH_ISSUER",
   "MCP_AUTH_SCOPE",
   "QBO_CREDENTIAL_MODE",
+  "QBO_READ_ONLY",
+  "QBO_ENABLED_TOOLS",
 ] as const;
 
 let jwksServer: HttpServer;
@@ -239,6 +242,77 @@ describe("remote tool allow-list", () => {
       assert.equal(result.isError, true, `${name} was not rejected`);
       assert.equal(result.content[0].text, `Unknown tool: ${name}`);
     }
+  });
+});
+
+describe("remote tool access gating", () => {
+  // QBO_READ_ONLY and QBO_ENABLED_TOOLS narrow the remote surface further, on
+  // top of what src/lambda.ts withholds. Withholding always wins: a name held
+  // back remotely stays unknown even when the allowlist names it.
+  const isReadOnlyName = (name: string): boolean =>
+    isReadOnlyTool(toolDefinitions.find((d) => d.name === name)!);
+
+  async function advertisedNames(handler: Handler): Promise<string[]> {
+    const listed = (await rpc(handler, { method: "tools/list" })) as {
+      tools: Array<{ name: string }>;
+    };
+    return listed.tools.map((t) => t.name).sort();
+  }
+
+  it("lambda-read-only-advertises-intersection", async () => {
+    const { handler, remoteToolNames } = await loadLambda();
+    process.env.QBO_READ_ONLY = "true";
+
+    const advertised = await advertisedNames(handler);
+
+    assert.deepEqual(advertised, [...remoteToolNames].filter(isReadOnlyName).sort());
+    assert.ok(!advertised.includes("qbo_authenticate"));
+  });
+
+  it("lambda-read-only-refuses-write-tools", async () => {
+    const { handler, remoteToolNames } = await loadLambda();
+    process.env.QBO_READ_ONLY = "true";
+
+    const writes = [...remoteToolNames].filter((name) => !isReadOnlyName(name));
+    assert.ok(writes.length > 0, "expected at least one remote write tool");
+
+    for (const name of writes) {
+      const result = await callTool(handler, name);
+      assert.equal(result.isError, true, `${name} was not rejected`);
+      assert.equal(
+        result.content[0].text,
+        `Tool ${name} is not available: disabled by QBO_READ_ONLY`
+      );
+    }
+  });
+
+  it("lambda-withhold-beats-allowlist", async () => {
+    const { handler } = await loadLambda();
+    process.env.QBO_ENABLED_TOOLS = "qbo_authenticate,query";
+
+    assert.deepEqual(await advertisedNames(handler), ["query"]);
+
+    const result = await callTool(handler, "qbo_authenticate");
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].text, "Unknown tool: qbo_authenticate");
+  });
+
+  it("lambda-read-only-allowlist-intersection", async () => {
+    const { handler } = await loadLambda();
+    process.env.QBO_READ_ONLY = "true";
+    process.env.QBO_ENABLED_TOOLS = "query,create_bill,qbo_authenticate";
+
+    assert.deepEqual(await advertisedNames(handler), ["query"]);
+
+    // Allowlisted, but a write tool under read-only.
+    const write = await callTool(handler, "create_bill");
+    assert.equal(write.isError, true);
+    assert.equal(write.content[0].text, "Tool create_bill is not available: disabled by QBO_READ_ONLY");
+
+    // Allowlisted and local-only, but withheld remotely: withholding still wins.
+    const withheld = await callTool(handler, "qbo_authenticate");
+    assert.equal(withheld.isError, true);
+    assert.equal(withheld.content[0].text, "Unknown tool: qbo_authenticate");
   });
 });
 
