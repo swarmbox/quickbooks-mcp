@@ -368,7 +368,7 @@ export const toolDefinitions = [
   {
     name: "create_journal_entry",
     annotations: { title: "Create QuickBooks journal entry", ...CREATE },
-    description: "Create a journal entry. Accepts account/department/entity names (will lookup IDs automatically). Validates debits=credits before creating. Lines may carry an entity (vendor, customer, or employee) — QuickBooks requires one on any line posting to Accounts Receivable or Accounts Payable. Returns entry details and a link to view in QuickBooks.",
+    description: "Create a journal entry. Accepts account/department/class/entity names (will lookup IDs automatically). Validates debits=credits before creating. Lines may carry an entity (vendor, customer, or employee) — QuickBooks requires one on any line posting to Accounts Receivable or Accounts Payable. Returns entry details and a link to view in QuickBooks.",
     inputSchema: {
       type: "object",
       properties: {
@@ -382,7 +382,7 @@ export const toolDefinitions = [
         },
         lines: {
           type: "array",
-          description: "Array of line items. Provide account_name OR account_id (name preferred). Optionally provide department_name OR department_id.",
+          description: "Array of line items. Provide account_name OR account_id (name preferred). Optionally provide department_name OR department_id, and class_name OR class_id for per-line Class tracking.",
           items: {
             type: "object",
             properties: {
@@ -410,6 +410,14 @@ export const toolDefinitions = [
               department_id: {
                 type: "string",
                 description: "Department/Location ID (use if you already know it, otherwise use department_name)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., 'North', 'Parent:Child'). Will be looked up to get ID. QBO Class tracking, distinct from Department/Location.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
               },
               description: {
                 type: "string",
@@ -462,7 +470,7 @@ export const toolDefinitions = [
   {
     name: "edit_journal_entry",
     annotations: { title: "Edit QuickBooks journal entry", ...EDIT_LINES },
-    description: "Modify an existing journal entry. Can update date, memo, doc_number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line, set delete=true to remove a line. A line_id preserves the line's existing entity unless entity_name/entity_id is given; pass entity_name: \"\" to clear it. Validates debits=credits before saving.",
+    description: "Modify an existing journal entry. Can update date, memo, doc_number, and/or lines. For lines: provide line_id to update existing line, omit line_id to add new line, set delete=true to remove a line. A line_id preserves the line's existing entity, class and department unless one is given (entity_name/entity_id, class_name/class_id, department_name); pass \"\" for entity_name, class_name or department_name to clear it. Validates debits=credits before saving.",
     inputSchema: {
       type: "object",
       properties: {
@@ -507,7 +515,15 @@ export const toolDefinitions = [
               },
               department_name: {
                 type: "string",
-                description: "Department/Location name (auto-resolved to ID)",
+                description: "Department/Location name (auto-resolved to ID). Omit to keep the line's current department; pass \"\" to clear it.",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (auto-resolved to ID). Omit to keep the line's current class; pass \"\" to clear it.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
               },
               description: {
                 type: "string",
