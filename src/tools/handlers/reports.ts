@@ -38,7 +38,8 @@ export async function handleGetProfitLoss(
   if (start_date) options.start_date = start_date;
   if (end_date) options.end_date = end_date;
   if (summarize_by) options.summarize_column_by = summarize_by;
-  if (department) options.department = await resolveDepartmentId(client, department);
+  const departmentId = department ? await resolveDepartmentId(client, department) : undefined;
+  if (departmentId !== undefined) options.department = departmentId;
   if (accounting_method) options.accounting_method = accounting_method;
 
   const result = await withRetry(() =>
@@ -80,7 +81,8 @@ export async function handleGetBalanceSheet(
     options.end_date = as_of_date;
   }
   if (summarize_by) options.summarize_column_by = summarize_by;
-  if (department) options.department = await resolveDepartmentId(client, department);
+  const departmentId = department ? await resolveDepartmentId(client, department) : undefined;
+  if (departmentId !== undefined) options.department = departmentId;
   if (accounting_method) options.accounting_method = accounting_method;
 
   const result = await withRetry(() =>

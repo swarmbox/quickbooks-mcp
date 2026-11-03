@@ -423,6 +423,8 @@ internal ID. On edit tools, the rule for line parameters is:
 - **name** one and it is set or replaced;
 - **pass an empty string** (`entity_name: ""`) and it is cleared.
 
+The header-level `department_name` on `edit_bill`, `edit_expense`, `edit_invoice`, `edit_sales_receipt` and `edit_deposit` follows the same rule: omit it to keep the document's department, name one to set it, or pass `""` to clear it.
+
 See [`docs/quickbooks-api-limitations.md`](docs/quickbooks-api-limitations.md#entity-attribution-is-four-different-fields)
 for the underlying QBO field shapes, which are not uniform.
 

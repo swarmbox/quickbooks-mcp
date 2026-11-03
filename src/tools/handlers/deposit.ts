@@ -8,13 +8,15 @@ import {
   getAccountCache,
   getDepartmentCache,
   resolveAccountRef,
+  resolveDepartmentInput,
   resolveEntityInput,
+  CLEARED_REF,
   toDepositEntity,
   toQboRef,
 } from "../../client/index.js";
 import type { ResolvedEntityRef } from "../../client/index.js";
 import { buildQboUrl, validateAmount, toDollars, formatDollars, toCents, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
-import type { AccountCache, DepartmentCache } from "../../types/index.js";
+import type { AccountCache } from "../../types/index.js";
 
 // --- Interfaces ---
 
@@ -77,21 +79,6 @@ function accountRefFor(acctCache: AccountCache, name: string): { value: string; 
   return toQboRef(resolveAccountRef(acctCache, name));
 }
 
-function resolveDepartmentRef(
-  deptCache: DepartmentCache,
-  nameOrId: string
-): { value: string; name: string } {
-  const byId = deptCache.byId.get(nameOrId);
-  if (byId) return { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-
-  let match = deptCache.byName.get(nameOrId.toLowerCase());
-  if (!match) match = deptCache.items.find(d =>
-    d.FullyQualifiedName?.toLowerCase().includes(nameOrId.toLowerCase())
-  );
-  if (!match) throw new Error(`Department not found: "${nameOrId}"`);
-  return { value: match.Id, name: match.FullyQualifiedName || match.Name };
-}
-
 
 // --- Handlers ---
 
@@ -126,11 +113,9 @@ export async function handleCreateDeposit(
   const depositToRef = accountRefFor(acctCache, deposit_to_account);
 
   // Resolve header-level department
-  let departmentRef: { value: string; name: string } | undefined;
-  const deptInput = department_id || department_name;
-  if (deptInput) {
-    departmentRef = resolveDepartmentRef(deptCache, deptInput);
-  }
+  // A blank input is no department; nothing exists to clear on create.
+  const departmentRef =
+    resolveDepartmentInput(deptCache, { department_id, department_name }) ?? undefined;
 
   // Resolve lines. Entity resolution is async (customers are looked up on
   // demand rather than bulk-cached), so this is a loop rather than a map.
@@ -357,9 +342,14 @@ export async function handleEditDeposit(
   }
 
   // Resolve header-level department if provided
-  if (department_name !== undefined) {
-    const ref = resolveDepartmentRef(deptCache!, department_name);
-    updated.DepartmentRef = ref;
+  // undefined leaves the department alone, null clears it, a ref sets it.
+  const departmentRef = deptCache
+    ? resolveDepartmentInput(deptCache, { department_name })
+    : undefined;
+  if (departmentRef === null) {
+    updated.DepartmentRef = CLEARED_REF;
+  } else if (departmentRef) {
+    updated.DepartmentRef = departmentRef;
   }
 
   // Process full line replacement if provided
@@ -466,7 +456,7 @@ export async function handleEditDeposit(
       previewLines.push(`  Deposit To: ${current.DepositToAccountRef?.name || '(default)'} \u2192 ${newAcct}`);
     }
     if (department_name !== undefined) {
-      const newDept = (updated.DepartmentRef as { name?: string })?.name || department_name;
+      const newDept = departmentRef?.name ?? '(none)';
       previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} \u2192 ${newDept}`);
     }
 

@@ -12,7 +12,16 @@
 // internal Id first, which the handler chain deliberately does not (handlers take
 // account_id as its own parameter).
 
-import type { AccountCache, VendorCache, TermCache, EmployeeCache, ClassCache, CachedAccount } from "../types/index.js";
+import type {
+  AccountCache,
+  VendorCache,
+  TermCache,
+  EmployeeCache,
+  ClassCache,
+  DepartmentCache,
+  CachedAccount,
+  CachedDepartment,
+} from "../types/index.js";
 
 // QBO ref shape. Accounts carry AcctNum along because callers echo it back in
 // their reports.
@@ -205,6 +214,41 @@ export function resolveClassRef(cache: ClassCache, nameOrId: string): VendorRef 
   if (byPartial) return { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
 
   throw new Error(`Class not found: "${nameOrId}"`);
+}
+
+// Find a department by internal Id, then exact name (case-insensitive), then a
+// partial match on the qualified name. The same chain resolveClassRef walks, and
+// the one department_id and department_name both go through.
+//
+// Input is trimmed first, and blank input matches nothing. Without that a lone
+// " " partial-matches the first department with a space in its name and quietly
+// assigns the transaction to it, which is how an "empty department" used to land
+// on the wrong one. Callers that treat blank as "clear" decide that before they
+// get here (resolveDepartmentInput); the finder just never answers for blank.
+export function findDepartment(
+  cache: DepartmentCache,
+  nameOrId: string
+): CachedDepartment | undefined {
+  const trimmed = nameOrId.trim();
+  if (trimmed === "") return undefined;
+  const key = trimmed.toLowerCase();
+
+  return (
+    cache.byId.get(trimmed) ??
+    cache.byName.get(key) ??
+    cache.items.find(d => d.FullyQualifiedName?.toLowerCase().includes(key))
+  );
+}
+
+// Resolve a department to a ref, throwing when nothing matches — posting to the
+// wrong department is worse than failing. The ref names the qualified form, which
+// is what QBO echoes back and what previews print. Blank input also throws: the
+// only route to here is resolveDepartmentInput, which turns blank into "clear"
+// before resolving, so a blank reaching this function is a caller bug.
+export function resolveDepartmentRef(cache: DepartmentCache, nameOrId: string): VendorRef {
+  const match = findDepartment(cache, nameOrId);
+  if (!match) throw new Error(`Department not found: "${nameOrId}"`);
+  return { value: match.Id, name: match.FullyQualifiedName || match.Name };
 }
 
 // Resolve an employee by internal Id, exact DisplayName, or partial DisplayName.

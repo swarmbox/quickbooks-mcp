@@ -11,6 +11,7 @@ import {
   resolveAccountRef,
   resolveVendorRef,
   resolveCustomerInput,
+  resolveDepartmentInput,
   toQboRef,
 } from "../../client/index.js";
 import { buildQboUrl, validateAmount, toDollars, formatDollars, sumCents, outputReport, formatUpdateResult } from "../../utils/index.js";
@@ -78,29 +79,9 @@ export async function handleCreateVendorCredit(
     throw new Error("Either vendor_name or vendor_id is required");
   }
 
-  // Resolve department (header-level)
-  let departmentRef: { value: string; name: string } | undefined;
-  const deptInput = department_id || department_name;
-  if (deptInput) {
-    const byId = deptCache.byId.get(deptInput);
-    if (byId) {
-      departmentRef = { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-    } else {
-      const byName = deptCache.byName.get(deptInput.toLowerCase());
-      if (byName) {
-        departmentRef = { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-      } else {
-        const byPartial = deptCache.items.find(d =>
-          d.FullyQualifiedName?.toLowerCase().includes(deptInput.toLowerCase())
-        );
-        if (byPartial) {
-          departmentRef = { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-        } else {
-          throw new Error(`Department not found: "${deptInput}"`);
-        }
-      }
-    }
-  }
+  // Resolve department (header-level). null (blank input) and undefined both
+  // leave DepartmentRef off a create.
+  const departmentRef = resolveDepartmentInput(deptCache, { department_id, department_name }) ?? undefined;
 
   // Resolve AP account if specified
   let apAccountRef: { value: string; name: string } | undefined;

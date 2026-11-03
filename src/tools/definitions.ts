@@ -717,7 +717,7 @@ export const toolDefinitions = [
         },
         department_name: {
           type: "string",
-          description: "Header-level department/location name (auto-resolved to ID)",
+          description: "Header-level department/location name (auto-resolved to ID). Omit to keep the current department; pass \"\" to clear it.",
         },
         doc_number: {
           type: "string",
@@ -893,7 +893,7 @@ export const toolDefinitions = [
         },
         department_name: {
           type: "string",
-          description: "Header-level department/location name (auto-resolved to ID)",
+          description: "Header-level department/location name (auto-resolved to ID). Omit to keep the current department; pass \"\" to clear it.",
         },
         entity_name: {
           type: "string",
@@ -1074,7 +1074,7 @@ export const toolDefinitions = [
         },
         department_name: {
           type: "string",
-          description: "Header-level department/location name (auto-resolved to ID)",
+          description: "Header-level department/location name (auto-resolved to ID). Omit to keep the current department; pass \"\" to clear it.",
         },
         lines: {
           type: "array",
@@ -1371,7 +1371,7 @@ export const toolDefinitions = [
         },
         department_name: {
           type: "string",
-          description: "Header-level department/location name (auto-resolved to ID)",
+          description: "Header-level department/location name (auto-resolved to ID). Omit to keep the current department; pass \"\" to clear it.",
         },
         lines: {
           type: "array",
@@ -1536,7 +1536,7 @@ export const toolDefinitions = [
         },
         department_name: {
           type: "string",
-          description: "Header-level department/location name (auto-resolved to ID)",
+          description: "Header-level department/location name (auto-resolved to ID). Omit to keep the current department; pass \"\" to clear it.",
         },
         lines: {
           type: "array",

@@ -185,9 +185,8 @@ export async function handleAccountPeriodSummary(
   options.start_date = startDateResolved;
   options.end_date = endDateResolved;
 
-  if (department) {
-    options.department = await resolveDepartmentId(client, department);
-  }
+  const departmentId = department ? await resolveDepartmentId(client, department) : undefined;
+  if (departmentId !== undefined) options.department = departmentId;
   if (accounting_method) {
     options.accounting_method = accounting_method;
   }
@@ -217,7 +216,7 @@ export async function handleAccountPeriodSummary(
     `Period: ${startDateResolved} to ${endDateResolved}`,
   ];
 
-  if (department) {
+  if (departmentId !== undefined) {
     summaryLines.push(`Department: ${department}`);
   }
   if (accounting_method) {
@@ -244,7 +243,7 @@ export async function handleAccountPeriodSummary(
       start: startDateResolved,
       end: endDateResolved,
     },
-    department: department || undefined,
+    department: departmentId === undefined ? undefined : department,
     accountingMethod: accounting_method || "Accrual",
     summary,
   };

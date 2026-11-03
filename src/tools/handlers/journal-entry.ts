@@ -10,12 +10,12 @@ import {
   getClassCache,
   resolveAccountRef,
   resolveClassInput,
+  resolveDepartmentInput,
   resolveEntityInput,
   toJournalEntryEntity,
   toQboRef,
 } from "../../client/index.js";
-import type { ClassLineInput, ResolvedEntityRef } from "../../client/index.js";
-import type { DepartmentCache } from "../../types/index.js";
+import type { ClassLineInput, DepartmentInput, ResolvedEntityRef } from "../../client/index.js";
 import {
   buildQboUrl,
   validateAmount,
@@ -27,25 +27,22 @@ import {
   formatUpdateResult,
 } from "../../utils/index.js";
 
-interface JournalEntryLine extends ClassLineInput {
+interface JournalEntryLine extends ClassLineInput, DepartmentInput {
   account_id?: string;
   account_name?: string;
   amount: number;
   posting_type: "Debit" | "Credit";
-  department_id?: string;
-  department_name?: string;
   description?: string;
   entity_name?: string;
   entity_id?: string;
   entity_type?: string;
 }
 
-interface JournalEntryLineChange extends ClassLineInput {
+interface JournalEntryLineChange extends ClassLineInput, DepartmentInput {
   line_id?: string;
   account_name?: string;
   amount?: number;
   posting_type?: "Debit" | "Credit";
-  department_name?: string;
   description?: string;
   entity_name?: string;
   entity_id?: string;
@@ -85,23 +82,6 @@ function formatLineClass(ref: { value: string; name?: string } | undefined): str
   return name ? ` [Class: ${name}]` : "";
 }
 
-// Resolve a department name against the cache: exact name, then partial match on
-// the fully qualified name. An empty name returns null before any partial match,
-// because "".includes("") is true and would otherwise resolve to the first
-// department; empty means "no department" (Finding 2).
-function resolveDepartmentName(
-  cache: DepartmentCache,
-  name: string
-): { value: string; name: string } | null {
-  const key = name.trim().toLowerCase();
-  if (key === "") return null;
-  const match =
-    cache.byName.get(key) ??
-    cache.items.find(d => d.FullyQualifiedName?.toLowerCase().includes(key));
-  if (!match) throw new Error(`Department not found: "${name}"`);
-  return { value: match.Id, name: match.FullyQualifiedName || match.Name };
-}
-
 // Render an entity for a preview line, e.g. " <Vendor: Acme Supply Co>".
 function formatLineEntity(entity: JournalEntryLineEntity | undefined): string {
   if (!entity) return "";
@@ -139,13 +119,12 @@ export async function handleCreateJournalEntry(
     amount_cents: number;
     entity?: ResolvedEntityRef;
     class_ref?: { value: string; name: string };
+    department_ref?: { value: string; name: string };
   }> = [];
   for (const line of lines) {
     let accountId = line.account_id;
     let accountName = line.account_name;
     let accountNum: string | undefined;
-    let departmentId = line.department_id;
-    let departmentName = line.department_name;
 
     // Resolve account
     if (!accountId && accountName) {
@@ -155,15 +134,6 @@ export async function handleCreateJournalEntry(
       accountNum = account.acctNum;
     } else if (!accountId && !accountName) {
       throw new Error("Each line must have either account_id or account_name");
-    }
-
-    // Resolve department
-    if (!departmentId && departmentName) {
-      const dept = resolveDepartmentName(deptCache, departmentName);
-      if (dept) {
-        departmentId = dept.value;
-        departmentName = dept.name;
-      }
     }
 
     // Validate and convert amount to cents
@@ -176,13 +146,15 @@ export async function handleCreateJournalEntry(
     // An empty class means "none" on create, same as an absent one.
     const classRef = resolveClassInput(classCache, line, `Line ${accountName || accountId}`);
 
+    // An id is validated against the cache; an empty department means "none".
+    const departmentRef = resolveDepartmentInput(deptCache, line, `Line ${accountName || accountId}`);
+
     resolvedLines.push({
       ...line,
       account_id: accountId!,
       account_name: accountName,
       account_num: accountNum,
-      department_id: departmentId,
-      department_name: departmentName,
+      department_ref: departmentRef ?? undefined,
       amount_cents: amountCents,
       entity: entity ?? undefined,
       class_ref: classRef ?? undefined,
@@ -217,11 +189,7 @@ export async function handleCreateJournalEntry(
           value: line.account_id,
           name: line.account_name
         },
-        ...(line.department_id && {
-          DepartmentRef: {
-            value: line.department_id
-          }
-        }),
+        ...(line.department_ref && { DepartmentRef: { value: line.department_ref.value } }),
         ...(line.class_ref && { ClassRef: line.class_ref }),
         ...(line.entity && { Entity: toJournalEntryEntity(line.entity) })
       }
@@ -245,7 +213,7 @@ export async function handleCreateJournalEntry(
       "",
       "Lines:",
       ...resolvedLines.map(l =>
-        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_id ? ` [Dept: ${l.department_name || l.department_id}]` : ""}${formatLineClass(l.class_ref)}${l.entity ? ` <${l.entity.type}: ${l.entity.name}>` : ""}: $${l.amount.toFixed(2)}`
+        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_ref ? ` [Dept: ${l.department_ref.name}]` : ""}${formatLineClass(l.class_ref)}${l.entity ? ` <${l.entity.type}: ${l.entity.name}>` : ""}: $${l.amount.toFixed(2)}`
       ),
       "",
       doc_number
@@ -429,11 +397,11 @@ export async function handleEditJournalEntry(
           if (change.description !== undefined) line.Description = change.description;
           if (change.posting_type !== undefined) detail.PostingType = change.posting_type;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
-          if (change.department_name !== undefined) {
-            const dept = resolveDepartmentName(deptCache, change.department_name);
-            if (dept === null) delete detail.DepartmentRef;
-            else detail.DepartmentRef = dept;
-          }
+
+          // undefined keeps the line's department, null clears it, a ref replaces it.
+          const dept = resolveDepartmentInput(deptCache, change, `Line ${change.line_id}`);
+          if (dept === null) delete detail.DepartmentRef;
+          else if (dept) detail.DepartmentRef = dept;
 
           // Spreading the existing detail already preserves Entity and ClassRef;
           // only an explicit input changes either, and an empty one clears it.
@@ -468,9 +436,11 @@ export async function handleEditJournalEntry(
           change,
           `New line for ${change.account_name}`
         );
-        const newDept = change.department_name
-          ? resolveDepartmentName(deptCache, change.department_name)
-          : null;
+        const newDept = resolveDepartmentInput(
+          deptCache,
+          change,
+          `New line for ${change.account_name}`
+        );
 
         // Id omitted for new lines - QB will assign
         const newLine = {

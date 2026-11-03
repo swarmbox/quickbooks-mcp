@@ -193,6 +193,7 @@ When performing sparse updates (`sparse: true`), certain fields are **required**
 | **JournalEntry** | `Id`, `SyncToken` | Minimal requirements |
 | **Bill** | `Id`, `SyncToken`, `VendorRef` | Must include vendor reference |
 | **Purchase** (Expense) | `Id`, `SyncToken`, `PaymentType` | PaymentType cannot be changed, but must be included |
+| **Deposit** | `Id`, `SyncToken`, `DepositToAccountRef` | Must include the deposit-to account |
 
 ### Example Error
 
@@ -219,13 +220,34 @@ The MCP edit tools (`edit_journal_entry`, `edit_bill`, `edit_expense`) automatic
 2. Copying the required fields to the update payload
 3. Applying only the requested changes
 
+## Clearing a Header Ref with a Sparse Update
+
+A sparse update cannot clear a header `DepartmentRef` by sending `null`. The behavior below was observed on **one sandbox company** (2026-11-03), with one invented department and one invented transaction per entity, all deleted afterwards. It is **inferred, not observed, for production**.
+
+**Shape of the probe.** Entities: Bill, Purchase, Invoice, SalesReceipt and Deposit. Each sparse update sent `Id`, `SyncToken`, `sparse: true` and the entity's required-for-sparse fields (see [Sparse Update Required Fields](#sparse-update-required-fields)), then the record was re-read. Results were identical on every entity:
+
+| `DepartmentRef` sent | HTTP answer | `SyncToken` | Department afterwards |
+|----------------------|-------------|-------------|-----------------------|
+| `null` | 200 | unchanged | still set (the value is ignored) |
+| `{}` | 200 | advances | cleared |
+| `{ value: "" }` | 200 | advances | cleared |
+| omitted | 200 | unchanged | unchanged |
+
+**Location tracking (`TrackDepartments`).** On: all five entities tested. Off: the four entities other than Deposit tested. Results were the same in both states.
+
+**Other header fields.** No other header field changed in any clearing update. The customer, vendor or payee ref, account refs, `PaymentType`, memo, dates, `DocNumber`, total and line count were compared before and after.
+
+**Deposit.** A sparse Deposit update also requires `DepositToAccountRef`; without it QBO answers fault 2020.
+
+**What the server does.** The edit tools clear a header department with `{ value: "" }`, exported as `CLEARED_REF` (`src/client/entity-refs.ts`), because it fits the existing ref type. An omitted `department_name` leaves the department alone, a name sets it, and `""` clears it.
+
 ## Expense (Purchase) Department Limitations
 
 ### Single Department Per Expense
 
 QBO expenses (Purchases) support only **one department at the header level**. While the API schema includes `DepartmentRef` on line-level `AccountBasedExpenseLineDetail`, the API rejects attempts to set line-level departments when lines are added or modified (error: "failed to parse json object; a property specified is unsupported or invalid").
 
-This means an expense transaction **cannot be split across multiple departments**. If a single vendor charge covers multiple locations (e.g., a $59.98 SimpliSafe charge for two stores), it cannot be represented as one expense with two department-tagged lines.
+This means an expense transaction **cannot be split across multiple departments**. If a single vendor charge covers multiple locations (e.g., a 100.00 charge covering the North and South stores), it cannot be represented as one expense with two department-tagged lines.
 
 ### Workarounds
 

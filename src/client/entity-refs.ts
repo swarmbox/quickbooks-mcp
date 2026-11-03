@@ -21,9 +21,9 @@
 
 import QuickBooks from "node-quickbooks";
 import { getVendorCache, getEmployeeCache, resolveCustomer, resolveItem } from "./cache.js";
-import { resolveVendorRef, resolveEmployeeRef, resolveClassRef, normalizeEntityKind } from "./refs.js";
+import { resolveVendorRef, resolveEmployeeRef, resolveClassRef, resolveDepartmentRef, normalizeEntityKind } from "./refs.js";
 import type { EntityKind, ResolvedEntityRef } from "./refs.js";
-import type { ClassCache } from "../types/index.js";
+import type { ClassCache, DepartmentCache } from "../types/index.js";
 
 // Resolve a name or id against the name list for `kind`.
 //
@@ -99,6 +99,11 @@ export interface ClassLineInput {
   class_id?: string;
 }
 
+export interface DepartmentInput {
+  department_name?: string;
+  department_id?: string;
+}
+
 // Errors are re-thrown with the caller's label so "Vendor not found" says which
 // line it came from.
 function withLabel(label: string, err: unknown): Error {
@@ -157,6 +162,34 @@ export function resolveClassInput(
     throw withLabel(label, err);
   }
 }
+
+// Resolve a department_name/department_id pair. Synchronous like
+// resolveClassInput: departments are bulk-cached and handlers already hold the
+// cache. Unlike the other inputs the label is optional, because a header
+// department has no line to name; without one the bare error propagates.
+export function resolveDepartmentInput(
+  cache: DepartmentCache,
+  input: DepartmentInput,
+  label?: string
+): EntityInputResult<{ value: string; name: string }> {
+  const raw = input.department_id ?? input.department_name;
+  if (raw === undefined) return undefined;
+  if (raw.trim() === "") return null;
+  try {
+    return resolveDepartmentRef(cache, raw);
+  } catch (err) {
+    throw label === undefined ? err : withLabel(label, err);
+  }
+}
+
+// What a payload carries to clear a department (or any ref) on a sparse update.
+//
+// QBO probe results: `null` is accepted and ignored, leaving the old ref in
+// place; `{}` and `{ value: "" }` both clear it. `{ value: "" }` was chosen
+// because it fits the existing { value, name? } ref type, so it needs no
+// special-casing in payload types. One shared object is placed into payloads,
+// so it is frozen: a mutation by one caller would corrupt every other.
+export const CLEARED_REF: Readonly<{ value: string }> = Object.freeze({ value: "" });
 
 // Resolve a customer_name/customer_id pair for the line details that accept a
 // customer and nothing else.
