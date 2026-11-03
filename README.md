@@ -339,9 +339,9 @@ The read-only set follows each tool's `readOnlyHint` annotation, so new tools ar
 | `query_account_transactions` | All transactions affecting a specific account (13 posting entity types, paginated, optional sub-account rollup; see `docs/entity-coverage.md` for limits) |
 | `account_period_summary` | Period summary for an account (opening/closing balance, debits, credits, count) |
 | **Journal Entries** | |
-| `create_journal_entry` | Create a journal entry (validates debits = credits; lines take `entity_name`/`entity_type`) |
+| `create_journal_entry` | Create a journal entry (validates debits = credits; lines take `entity_name`/`entity_type` and `class_name`) |
 | `get_journal_entry` | Fetch a journal entry by ID |
-| `edit_journal_entry` | Modify an existing journal entry |
+| `edit_journal_entry` | Modify an existing journal entry (an edited line keeps its entity, class and department unless given; `""` clears `entity_name`, `class_name` or `department_name`) |
 | **Bills** | |
 | `create_bill` | Create a vendor bill (lines take an account or an item, plus `class_name` and `customer_name`; `sales_term_ref` sets payment terms and computes the due date when `due_date` is omitted) |
 | `get_bill` | Fetch a bill by ID, including its payment terms |
@@ -410,7 +410,7 @@ actually store there:
 | `vendor_name` | `create_bill`, `create_vendor_credit`, `create_bill_payment` headers | Vendor only. |
 | `customer_name` (header) | `create_invoice`, `create_sales_receipt` | Customer only. Their item lines have no per-line entity. |
 | `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. |
-| `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
+| `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_journal_entry` / `edit_journal_entry` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
 | `sales_term_ref` | `create_bill` / `edit_bill`, `create_invoice` / `edit_invoice`, `create_customer` / `edit_customer` headers | A Term, by exact name (case-insensitive) or Id; a miss lists the available names. On bills a missing `due_date` is computed from it (`txn_date` plus the term's days); an explicit `due_date` is kept, and date-driven terms need `due_date`. |
 
 A vendor's display name must be unique across customers, vendors and employees; a vendor created or renamed with `create_vendor` or `edit_vendor` resolves by its new name in the other write tools straight away, and a vendor deactivated with `edit_vendor` stops resolving.

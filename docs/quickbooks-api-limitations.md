@@ -336,6 +336,7 @@ one of them:
 `ClassRef` sits **inside the line detail**, on both shapes — it is not a header
 field, and it is unrelated to the header-level `DepartmentRef`. A property-management
 book tagging each line with a class for per-property P&L is the common case.
+Journal entry lines carry `ClassRef` inside `JournalEntryLineDetail` too.
 
 A name that looks like an account may be an item: `Utilities:Water & Sewer` can
 be an item's `FullyQualifiedName` whose own `ExpenseAccountRef` points at a plain

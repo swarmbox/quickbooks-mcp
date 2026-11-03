@@ -313,3 +313,39 @@ describe("item and class line parameters", () => {
     assert.match(message, /itm_class/);
   });
 });
+
+// Class on journal entry lines.
+describe("journal entry line class", () => {
+  const JE_TOOLS = ["create_journal_entry", "edit_journal_entry"];
+
+  it("je-schemas-declare-class-params: both tools declare class_name and class_id as strings", () => {
+    for (const tool of JE_TOOLS) {
+      const props = lineProperties(tool) as Record<string, { type?: string }>;
+      for (const key of ["class_name", "class_id"]) {
+        assert.ok(key in props, `${tool} line schema is missing ${key}`);
+        assert.equal(props[key].type, "string", `${tool} ${key} should be a string`);
+      }
+    }
+  });
+
+  it("je-edit-schema-documents-clear: edit descriptions of class_name and department_name explain \"\" clears", () => {
+    const props = lineProperties("edit_journal_entry") as Record<string, { description?: string }>;
+    for (const key of ["class_name", "department_name"]) {
+      const description = props[key]?.description ?? "";
+      assert.ok(description.includes('""'), `${key} description does not mention ""`);
+      assert.match(description, /clear/i, `${key} description does not mention clear`);
+    }
+  });
+
+  it("je-validator-accepts-class-line: class params pass validation on create and edit", () => {
+    assert.doesNotThrow(() =>
+      check("create_journal_entry", {
+        txn_date: "2026-01-31",
+        lines: [{ account_name: "6000", amount: 100, posting_type: "Debit", class_name: "North" }],
+      })
+    );
+    assert.doesNotThrow(() =>
+      check("edit_journal_entry", { id: "600", lines: [{ line_id: "0", class_id: "" }] })
+    );
+  });
+});

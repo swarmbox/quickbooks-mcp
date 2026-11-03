@@ -7,12 +7,15 @@ import {
   promisifyWrite,
   getAccountCache,
   getDepartmentCache,
+  getClassCache,
   resolveAccountRef,
+  resolveClassInput,
   resolveEntityInput,
   toJournalEntryEntity,
   toQboRef,
 } from "../../client/index.js";
-import type { ResolvedEntityRef } from "../../client/index.js";
+import type { ClassLineInput, ResolvedEntityRef } from "../../client/index.js";
+import type { DepartmentCache } from "../../types/index.js";
 import {
   buildQboUrl,
   validateAmount,
@@ -24,7 +27,7 @@ import {
   formatUpdateResult,
 } from "../../utils/index.js";
 
-interface JournalEntryLine {
+interface JournalEntryLine extends ClassLineInput {
   account_id?: string;
   account_name?: string;
   amount: number;
@@ -37,7 +40,7 @@ interface JournalEntryLine {
   entity_type?: string;
 }
 
-interface JournalEntryLineChange {
+interface JournalEntryLineChange extends ClassLineInput {
   line_id?: string;
   account_name?: string;
   amount?: number;
@@ -55,6 +58,48 @@ interface JournalEntryLineChange {
 interface JournalEntryLineEntity {
   Type: string;
   EntityRef: { value: string; name?: string };
+}
+
+// One journal entry line as QBO returns it. The same shape serves the get
+// summary and the edit handler, which rewrites these lines in place.
+interface QboJournalLine {
+  Id: string;
+  LineNum?: number;
+  Amount: number;
+  Description?: string;
+  DetailType: string;
+  JournalEntryLineDetail: {
+    PostingType: string;
+    AccountRef: { value: string; name?: string };
+    ClassRef?: { value: string; name?: string };
+    DepartmentRef?: { value: string; name?: string };
+    Entity?: JournalEntryLineEntity;
+  };
+}
+
+// Render a class for a preview line, e.g. " [Class: North]". Shared by the
+// create preview, the edit preview and the get summary.
+function formatLineClass(ref: { value: string; name?: string } | undefined): string {
+  if (!ref) return "";
+  const name = ref.name || ref.value;
+  return name ? ` [Class: ${name}]` : "";
+}
+
+// Resolve a department name against the cache: exact name, then partial match on
+// the fully qualified name. An empty name returns null before any partial match,
+// because "".includes("") is true and would otherwise resolve to the first
+// department; empty means "no department" (Finding 2).
+function resolveDepartmentName(
+  cache: DepartmentCache,
+  name: string
+): { value: string; name: string } | null {
+  const key = name.trim().toLowerCase();
+  if (key === "") return null;
+  const match =
+    cache.byName.get(key) ??
+    cache.items.find(d => d.FullyQualifiedName?.toLowerCase().includes(key));
+  if (!match) throw new Error(`Department not found: "${name}"`);
+  return { value: match.Id, name: match.FullyQualifiedName || match.Name };
 }
 
 // Render an entity for a preview line, e.g. " <Vendor: Acme Supply Co>".
@@ -79,37 +124,21 @@ export async function handleCreateJournalEntry(
   // Defensive: MCP transports may deliver arrays as JSON strings
   const lines: JournalEntryLine[] = typeof rawLines === "string" ? JSON.parse(rawLines) : rawLines;
 
-  // Get cached accounts and departments (uses TTL-based cache)
-  const [acctCache, deptCache] = await Promise.all([
+  // Get cached accounts, departments and classes (uses TTL-based cache)
+  const [acctCache, deptCache, classCache] = await Promise.all([
     getAccountCache(client),
-    getDepartmentCache(client)
+    getDepartmentCache(client),
+    getClassCache(client)
   ]);
 
-  // Helper to lookup department by name from cache
-  const lookupDepartment = (name: string): { id: string; name: string } => {
-    // Try exact name match (case-insensitive)
-    let match = deptCache.byName.get(name.toLowerCase());
-
-    // Try partial match on FullyQualifiedName
-    if (!match) {
-      match = deptCache.items.find(d =>
-        d.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-      );
-    }
-
-    if (match) {
-      return { id: match.Id, name: match.FullyQualifiedName || match.Name };
-    }
-    throw new Error(`Department not found: "${name}"`);
-  };
-
-  // Resolve account and department names to IDs (account/department lookups are
-  // from cache; entity resolution can hit the API, so this is a loop).
+  // Resolve account, department and class names to IDs (those lookups are from
+  // cache; entity resolution can hit the API, so this is a loop).
   const resolvedLines: Array<JournalEntryLine & {
     account_id: string;
     account_num?: string;
     amount_cents: number;
     entity?: ResolvedEntityRef;
+    class_ref?: { value: string; name: string };
   }> = [];
   for (const line of lines) {
     let accountId = line.account_id;
@@ -130,9 +159,11 @@ export async function handleCreateJournalEntry(
 
     // Resolve department
     if (!departmentId && departmentName) {
-      const dept = lookupDepartment(departmentName);
-      departmentId = dept.id;
-      departmentName = dept.name;
+      const dept = resolveDepartmentName(deptCache, departmentName);
+      if (dept) {
+        departmentId = dept.value;
+        departmentName = dept.name;
+      }
     }
 
     // Validate and convert amount to cents
@@ -141,6 +172,9 @@ export async function handleCreateJournalEntry(
     // Resolve the line's entity (vendor/customer/employee). QBO requires one on
     // any line posting to A/R or A/P and accepts it as attribution elsewhere.
     const entity = await resolveEntityInput(client, line, `Line ${accountName || accountId}`);
+
+    // An empty class means "none" on create, same as an absent one.
+    const classRef = resolveClassInput(classCache, line, `Line ${accountName || accountId}`);
 
     resolvedLines.push({
       ...line,
@@ -151,6 +185,7 @@ export async function handleCreateJournalEntry(
       department_name: departmentName,
       amount_cents: amountCents,
       entity: entity ?? undefined,
+      class_ref: classRef ?? undefined,
       // Normalize amount to exactly 2 decimal places
       amount: toDollars(amountCents)
     });
@@ -187,6 +222,7 @@ export async function handleCreateJournalEntry(
             value: line.department_id
           }
         }),
+        ...(line.class_ref && { ClassRef: line.class_ref }),
         ...(line.entity && { Entity: toJournalEntryEntity(line.entity) })
       }
     }))
@@ -209,7 +245,7 @@ export async function handleCreateJournalEntry(
       "",
       "Lines:",
       ...resolvedLines.map(l =>
-        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_id ? ` [Dept: ${l.department_name || l.department_id}]` : ""}${l.entity ? ` <${l.entity.type}: ${l.entity.name}>` : ""}: $${l.amount.toFixed(2)}`
+        `  ${l.posting_type.padEnd(6)} ${formatAccount(l)}${l.department_id ? ` [Dept: ${l.department_name || l.department_id}]` : ""}${formatLineClass(l.class_ref)}${l.entity ? ` <${l.entity.type}: ${l.entity.name}>` : ""}: $${l.amount.toFixed(2)}`
       ),
       "",
       doc_number
@@ -260,18 +296,7 @@ export async function handleGetJournalEntry(
     DocNumber?: string;
     PrivateNote?: string;
     TotalAmt?: number;
-    Line?: Array<{
-      Id: string;
-      Amount: number;
-      Description?: string;
-      DetailType: string;
-      JournalEntryLineDetail?: {
-        PostingType: string;
-        AccountRef: { value: string; name?: string };
-        DepartmentRef?: { value: string; name?: string };
-        Entity?: JournalEntryLineEntity;
-      };
-    }>;
+    Line?: QboJournalLine[];
   };
   const qboUrl = buildQboUrl("journal", "txnId", je.Id);
 
@@ -295,9 +320,10 @@ export async function handleGetJournalEntry(
     const acctName = detail.AccountRef.name || detail.AccountRef.value;
     const deptName = detail.DepartmentRef?.name || detail.DepartmentRef?.value;
     const deptStr = deptName ? ` [${deptName}]` : '';
+    const classStr = formatLineClass(detail.ClassRef);
     const entityStr = formatLineEntity(detail.Entity);
     const descStr = line.Description ? ` "${line.Description}"` : '';
-    lines.push(`  Line ${line.Id}: ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${entityStr} $${line.Amount.toFixed(2)}${descStr}`);
+    lines.push(`  Line ${line.Id}: ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${classStr}${entityStr} $${line.Amount.toFixed(2)}${descStr}`);
   }
 
   lines.push('', ...(await formatAttachmentLines(client, 'JournalEntry', je.Id)));
@@ -333,18 +359,7 @@ export async function handleEditJournalEntry(
     TxnDate: string;
     DocNumber?: string;
     PrivateNote?: string;
-    Line: Array<{
-      Id: string;
-      Amount: number;
-      Description?: string;
-      DetailType: string;
-      JournalEntryLineDetail: {
-        PostingType: string;
-        AccountRef: { value: string; name?: string };
-        DepartmentRef?: { value: string; name?: string };
-        Entity?: JournalEntryLineEntity;
-      };
-    }>;
+    Line: QboJournalLine[];
   };
 
   // Determine whether the Line array has to be rebuilt for this edit
@@ -365,7 +380,7 @@ export async function handleEditJournalEntry(
   if (needsLineRebuild) {
     // Seed with the existing lines, stripping read-only fields
     updated.Line = current.Line.map(line => {
-      const { LineNum, ...rest } = line as Record<string, unknown>;
+      const { LineNum, ...rest } = line;
       return rest;
     });
   }
@@ -381,23 +396,14 @@ export async function handleEditJournalEntry(
 
   if (lineChanges && lineChanges.length > 0) {
     // Get caches for lookups
-    const [acctCache, deptCache] = await Promise.all([
+    const [acctCache, deptCache, classCache] = await Promise.all([
       getAccountCache(client),
-      getDepartmentCache(client)
+      getDepartmentCache(client),
+      getClassCache(client)
     ]);
 
     // Helper to resolve account
     const resolveAcct = (name: string) => toQboRef(resolveAccountRef(acctCache, name));
-
-    // Helper to resolve department
-    const resolveDept = (name: string) => {
-      let match = deptCache.byName.get(name.toLowerCase());
-      if (!match) match = deptCache.items.find(d =>
-        d.FullyQualifiedName?.toLowerCase().includes(name.toLowerCase())
-      );
-      if (!match) throw new Error(`Department not found: "${name}"`);
-      return { value: match.Id, name: match.FullyQualifiedName || match.Name };
-    };
 
     for (const change of lineChanges) {
       if (change.line_id) {
@@ -423,13 +429,21 @@ export async function handleEditJournalEntry(
           if (change.description !== undefined) line.Description = change.description;
           if (change.posting_type !== undefined) detail.PostingType = change.posting_type;
           if (change.account_name !== undefined) detail.AccountRef = resolveAcct(change.account_name);
-          if (change.department_name !== undefined) detail.DepartmentRef = resolveDept(change.department_name);
+          if (change.department_name !== undefined) {
+            const dept = resolveDepartmentName(deptCache, change.department_name);
+            if (dept === null) delete detail.DepartmentRef;
+            else detail.DepartmentRef = dept;
+          }
 
-          // Spreading the existing detail already preserves Entity; only an
-          // explicit entity input changes it, and an empty one clears it.
+          // Spreading the existing detail already preserves Entity and ClassRef;
+          // only an explicit input changes either, and an empty one clears it.
           const entity = await resolveEntityInput(client, change, `Line ${change.line_id}`);
           if (entity === null) delete detail.Entity;
           else if (entity) detail.Entity = toJournalEntryEntity(entity);
+
+          const classRef = resolveClassInput(classCache, change, `Line ${change.line_id}`);
+          if (classRef === null) delete detail.ClassRef;
+          else if (classRef) detail.ClassRef = classRef;
 
           line.JournalEntryLineDetail = detail;
           finalLines[lineIndex] = line;
@@ -449,6 +463,15 @@ export async function handleEditJournalEntry(
           `New line for ${change.account_name}`
         );
 
+        const newClassRef = resolveClassInput(
+          classCache,
+          change,
+          `New line for ${change.account_name}`
+        );
+        const newDept = change.department_name
+          ? resolveDepartmentName(deptCache, change.department_name)
+          : null;
+
         // Id omitted for new lines - QB will assign
         const newLine = {
           Amount: toDollars(amountCents),
@@ -457,7 +480,8 @@ export async function handleEditJournalEntry(
           JournalEntryLineDetail: {
             PostingType: change.posting_type,
             AccountRef: resolveAcct(change.account_name),
-            ...(change.department_name && { DepartmentRef: resolveDept(change.department_name) }),
+            ...(newDept && { DepartmentRef: newDept }),
+            ...(newClassRef && { ClassRef: newClassRef }),
             ...(newEntity && { Entity: toJournalEntryEntity(newEntity) })
           }
         } as typeof finalLines[0];
@@ -505,8 +529,9 @@ export async function handleEditJournalEntry(
         const detail = line.JournalEntryLineDetail;
         const acctName = detail.AccountRef.name || detail.AccountRef.value;
         const deptStr = detail.DepartmentRef?.name ? ` [${detail.DepartmentRef.name}]` : '';
+        const classStr = formatLineClass(detail.ClassRef);
         const entityStr = formatLineEntity(detail.Entity);
-        previewLines.push(`  ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${entityStr}: $${line.Amount.toFixed(2)}`);
+        previewLines.push(`  ${detail.PostingType.padEnd(6)} ${acctName}${deptStr}${classStr}${entityStr}: $${line.Amount.toFixed(2)}`);
       }
     }
 
