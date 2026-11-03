@@ -149,9 +149,8 @@ export async function handleGetReport(
   // resolveDepartmentId returns an unmatched name unchanged for QBO to reject,
   // so unlike resolveCustomer/resolveVendor — which throw — it can hand back
   // arbitrary text. It gets the same guard as any other free-text criterion.
-  if (department) {
-    options.department = criterion("department", await resolveDepartmentId(client, department));
-  }
+  const departmentId = department ? await resolveDepartmentId(client, department) : undefined;
+  if (departmentId !== undefined) options.department = criterion("department", departmentId);
   if (customer) options.customer = (await resolveCustomer(client, customer)).value;
   if (vendor) options.vendor = (await resolveVendor(client, vendor)).value;
 

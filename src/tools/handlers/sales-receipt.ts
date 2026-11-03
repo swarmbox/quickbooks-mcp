@@ -7,6 +7,8 @@ import {
   promisifyWrite,
   getAccountCache,
   getDepartmentCache,
+  resolveDepartmentInput,
+  CLEARED_REF,
   resolveItem,
   resolveCustomer,
   resolveAccountRef,
@@ -76,29 +78,13 @@ export async function handleCreateSalesReceipt(
     );
   }
 
-  // Resolve department (header-level, optional)
+  // Resolve department (header-level, optional). The cache is fetched only when
+  // department input is present; blank input means "no department".
   let departmentRef: { value: string; name: string } | undefined;
-  const deptInput = department_id || department_name;
-  if (deptInput) {
-    const deptCache = await getDepartmentCache(client);
-    const byId = deptCache.byId.get(deptInput);
-    if (byId) {
-      departmentRef = { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-    } else {
-      const byName = deptCache.byName.get(deptInput.toLowerCase());
-      if (byName) {
-        departmentRef = { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-      } else {
-        const byPartial = deptCache.items.find(d =>
-          d.FullyQualifiedName?.toLowerCase().includes(deptInput.toLowerCase())
-        );
-        if (byPartial) {
-          departmentRef = { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-        } else {
-          throw new Error(`Department not found: "${deptInput}"`);
-        }
-      }
-    }
+  if ((department_id ?? department_name) !== undefined) {
+    departmentRef =
+      resolveDepartmentInput(await getDepartmentCache(client), { department_id, department_name }) ??
+      undefined;
   }
 
   // Resolve lines
@@ -350,15 +336,11 @@ export async function handleEditSalesReceipt(
     );
   }
 
-  // Resolve header-level department if provided
+  // Resolve header-level department if provided: "" clears, omitted keeps.
+  let departmentChange: ReturnType<typeof resolveDepartmentInput>;
   if (department_name !== undefined) {
-    const deptCache = await getDepartmentCache(client);
-    let match = deptCache.byName.get(department_name.toLowerCase());
-    if (!match) match = deptCache.items.find(d =>
-      d.FullyQualifiedName?.toLowerCase().includes(department_name.toLowerCase())
-    );
-    if (!match) throw new Error(`Department not found: "${department_name}"`);
-    updated.DepartmentRef = { value: match.Id, name: match.FullyQualifiedName || match.Name };
+    departmentChange = resolveDepartmentInput(await getDepartmentCache(client), { department_name });
+    updated.DepartmentRef = departmentChange ?? CLEARED_REF;
   }
 
   // Process line changes if provided
@@ -459,8 +441,7 @@ export async function handleEditSalesReceipt(
       previewLines.push(`  Deposit To: ${current.DepositToAccountRef?.name || '(default)'} → ${newAcct}`);
     }
     if (department_name !== undefined) {
-      const newDept = (updated.DepartmentRef as { name?: string })?.name || department_name;
-      previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${newDept}`);
+      previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${departmentChange?.name ?? '(none)'}`);
     }
 
     if (updated.Line) {

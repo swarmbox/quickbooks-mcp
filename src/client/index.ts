@@ -37,6 +37,8 @@ export {
   resolveTermRef,
   termDueDays,
   resolveClassRef,
+  findDepartment,
+  resolveDepartmentRef,
   normalizeEntityKind,
   ENTITY_KINDS,
   toQboRef,
@@ -58,6 +60,8 @@ export {
   resolveCustomerInput,
   resolveItemInput,
   resolveClassInput,
+  resolveDepartmentInput,
+  CLEARED_REF,
   toDepositEntity,
   toJournalEntryEntity,
   toPurchaseEntityRef,
@@ -68,4 +72,5 @@ export type {
   CustomerLineInput,
   ItemLineInput,
   ClassLineInput,
+  DepartmentInput,
 } from './entity-refs.js';

@@ -2,6 +2,7 @@
 
 import QuickBooks from "node-quickbooks";
 import { promisify } from "./promisify.js";
+import { findDepartment } from "./refs.js";
 import {
   CachedAccount,
   CachedCustomer,
@@ -413,27 +414,17 @@ export async function resolveItem(client: QuickBooks, nameOrId: string): Promise
   return { value: item.Id, name: item.Name };
 }
 
-// Helper to resolve department name to ID using cache
-// Accepts: internal ID (e.g., "5"), name (e.g., "20400"), or partial match
-export async function resolveDepartmentId(client: QuickBooks, department: string): Promise<string> {
-  const cache = await getDepartmentCache(client);
-
-  // Try exact ID match first
-  const byId = cache.byId.get(department);
-  if (byId) return byId.Id;
-
-  // Try exact name match (case-insensitive)
-  const byName = cache.byName.get(department.toLowerCase());
-  if (byName) return byName.Id;
-
-  // Try partial/fuzzy match on FullyQualifiedName
-  const byPartial = cache.items.find(d =>
-    d.FullyQualifiedName?.toLowerCase().includes(department.toLowerCase())
-  );
-  if (byPartial) return byPartial.Id;
-
-  // If nothing found, return as-is (let API handle error)
-  return department;
+// Resolve a department filter to its ID for the read tools, through the shared
+// finder (Id, then exact name, then partial qualified name; input trimmed).
+// Blank input gives undefined so callers apply no filter. A miss returns the
+// input unchanged, leaving QBO to reject it.
+export async function resolveDepartmentId(
+  client: QuickBooks,
+  department: string
+): Promise<string | undefined> {
+  if (department.trim() === "") return undefined;
+  const match = findDepartment(await getDepartmentCache(client), department);
+  return match ? match.Id : department;
 }
 
 // Resolve customer by name or ID using lazy per-entry cache

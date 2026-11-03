@@ -11,6 +11,8 @@ import {
   resolveAccountRef,
   resolveEntityRef,
   resolveClassInput,
+  resolveDepartmentInput,
+  CLEARED_REF,
   resolveItemInput,
   resolveCustomerInput,
   normalizeEntityKind,
@@ -105,29 +107,9 @@ export async function handleCreateExpense(
     );
   }
 
-  // Resolve department (header-level, optional)
-  let departmentRef: { value: string; name: string } | undefined;
-  const deptInput = department_id || department_name;
-  if (deptInput) {
-    const byId = deptCache.byId.get(deptInput);
-    if (byId) {
-      departmentRef = { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-    } else {
-      const byName = deptCache.byName.get(deptInput.toLowerCase());
-      if (byName) {
-        departmentRef = { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-      } else {
-        const byPartial = deptCache.items.find(d =>
-          d.FullyQualifiedName?.toLowerCase().includes(deptInput.toLowerCase())
-        );
-        if (byPartial) {
-          departmentRef = { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-        } else {
-          throw new Error(`Department not found: "${deptInput}"`);
-        }
-      }
-    }
-  }
+  // Resolve department (header-level, optional). A blank input is no
+  // department, the same as omitting it.
+  const departmentRef = resolveDepartmentInput(deptCache, { department_id, department_name }) ?? undefined;
 
   // Resolve lines. Item and customer resolution can hit the API, so this is a
   // loop. A line posts against an item or an account, never both.
@@ -506,16 +488,11 @@ export async function handleEditExpense(
     );
   }
 
-  // Resolve header-level department if provided
-  if (department_name !== undefined) {
-    const deptCache = await getDepartmentCache(client);
-    let match = deptCache.byName.get(department_name.toLowerCase());
-    if (!match) match = deptCache.items.find(d =>
-      d.FullyQualifiedName?.toLowerCase().includes(department_name.toLowerCase())
-    );
-    if (!match) throw new Error(`Department not found: "${department_name}"`);
-    updated.DepartmentRef = { value: match.Id, name: match.FullyQualifiedName || match.Name };
-  }
+  // Resolve header-level department: undefined keeps it, null clears it
+  const departmentRef = department_name === undefined
+    ? undefined
+    : resolveDepartmentInput(await getDepartmentCache(client), { department_name });
+  if (departmentRef !== undefined) updated.DepartmentRef = departmentRef ?? CLEARED_REF;
 
   // Resolve the payee if provided. entity_type picks the name list (Vendor,
   // Customer, or Employee) and defaults to Vendor.
@@ -748,7 +725,7 @@ export async function handleEditExpense(
       previewLines.push(`  Payment Account: ${current.AccountRef?.name || '(none)'} → ${newAcct}`);
     }
     if (department_name !== undefined) {
-      const newDept = (updated.DepartmentRef as { name?: string })?.name || department_name;
+      const newDept = departmentRef?.name ?? '(none)';
       previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${newDept}`);
     }
     if (entityInput) {

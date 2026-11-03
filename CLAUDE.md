@@ -123,6 +123,7 @@ Names are auto-resolved to IDs using cached lookups:
 - `account_name: "Tips"` → looks up ID from cache
 - `department_name: "North"` → looks up ID from cache
 - Caches are session-scoped with TTL
+- A blank department name never resolves; department names resolve through `resolveDepartmentInput` (`src/client/entity-refs.ts`)
 
 ### QBO Error Handling (Never Leak Tokens)
 
@@ -211,6 +212,7 @@ Both builds must pass before committing. After changes, restart Claude Code to r
 - Some entities require additional fields for sparse updates:
   - Bill: `VendorRef`
   - Purchase (Expense): `PaymentType`
+  - Deposit: `DepositToAccountRef`
 - Department/Location filtering must be done client-side (not in QB queries)
 - Intuit throttles per realm. Fan out queries with `mapWithConcurrency` (not a
   bare `Promise.all`) and let `withRetry` in `src/client/throttle.ts` handle

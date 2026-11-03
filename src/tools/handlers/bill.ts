@@ -16,6 +16,8 @@ import {
   resolveVendorRef,
   resolveClassRef,
   resolveClassInput,
+  resolveDepartmentInput,
+  CLEARED_REF,
   resolveItemInput,
   resolveCustomerInput,
   resolveTermRef,
@@ -149,29 +151,9 @@ export async function handleCreateBill(
     throw new Error("Either vendor_name or vendor_id is required");
   }
 
-  // Resolve department (header-level)
-  let departmentRef: { value: string; name: string } | undefined;
-  const deptInput = department_id || department_name;
-  if (deptInput) {
-    const byId = deptCache.byId.get(deptInput);
-    if (byId) {
-      departmentRef = { value: byId.Id, name: byId.FullyQualifiedName || byId.Name };
-    } else {
-      const byName = deptCache.byName.get(deptInput.toLowerCase());
-      if (byName) {
-        departmentRef = { value: byName.Id, name: byName.FullyQualifiedName || byName.Name };
-      } else {
-        const byPartial = deptCache.items.find(d =>
-          d.FullyQualifiedName?.toLowerCase().includes(deptInput.toLowerCase())
-        );
-        if (byPartial) {
-          departmentRef = { value: byPartial.Id, name: byPartial.FullyQualifiedName || byPartial.Name };
-        } else {
-          throw new Error(`Department not found: "${deptInput}"`);
-        }
-      }
-    }
-  }
+  // Resolve department (header-level). null (blank input) and undefined both
+  // leave DepartmentRef off a create.
+  const departmentRef = resolveDepartmentInput(deptCache, { department_id, department_name }) ?? undefined;
 
   // Resolve AP account if specified
   let apAccountRef: { value: string; name: string } | undefined;
@@ -562,15 +544,12 @@ export async function handleEditBill(
   if (memo !== undefined) updated.PrivateNote = memo;
   if (doc_number !== undefined) updated.DocNumber = doc_number;
 
-  // Resolve department if changing
+  // Resolve department if changing: undefined leaves it, null (blank) clears it.
+  let departmentRef: { value: string; name: string } | null | undefined;
   if (department_name !== undefined) {
-    const deptCache = await getDepartmentCache(client);
-    let match = deptCache.byName.get(department_name.toLowerCase());
-    if (!match) match = deptCache.items.find(d =>
-      d.FullyQualifiedName?.toLowerCase().includes(department_name.toLowerCase())
-    );
-    if (!match) throw new Error(`Department not found: "${department_name}"`);
-    updated.DepartmentRef = { value: match.Id, name: match.FullyQualifiedName || match.Name };
+    departmentRef = resolveDepartmentInput(await getDepartmentCache(client), { department_name });
+    if (departmentRef === null) updated.DepartmentRef = CLEARED_REF;
+    else if (departmentRef) updated.DepartmentRef = departmentRef;
   }
 
   // Process line changes if provided
@@ -797,7 +776,7 @@ export async function handleEditBill(
     if (termRef) previewLines.push(`  Terms: ${await describeTermRef(client, current.SalesTermRef)} → ${termRef.name}`);
     if (memo !== undefined) previewLines.push(`  Memo: ${current.PrivateNote || '(none)'} → ${memo}`);
     if (doc_number !== undefined) previewLines.push(`  Ref no.: ${current.DocNumber || '(none)'} → ${doc_number}`);
-    if (department_name !== undefined) previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${(updated.DepartmentRef as { name?: string })?.name || department_name}`);
+    if (department_name !== undefined) previewLines.push(`  Department: ${current.DepartmentRef?.name || '(none)'} → ${departmentRef?.name || '(none)'}`);
 
     // Changing txn_date alone leaves the due date as it is (a call without terms
     // sends today's payload), so say so on a bill whose terms would move it.

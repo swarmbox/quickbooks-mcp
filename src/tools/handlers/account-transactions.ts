@@ -4,6 +4,7 @@ import QuickBooks from "node-quickbooks";
 import {
   resolveAccount,
   getDepartmentCache,
+  findDepartment,
   getAccountCache,
   collectAccountTree,
 } from "../../client/index.js";
@@ -134,30 +135,11 @@ export async function handleQueryAccountTransactions(
   // Resolve department if provided using cache
   let resolvedDepartmentId: string | undefined;
   let resolvedDepartmentName: string | undefined;
-  if (department) {
-    const deptCache = await getDepartmentCache(client);
-
-    // Try exact ID match
-    let deptMatch = deptCache.byId.get(department);
-
-    // Try exact name match (case-insensitive)
-    if (!deptMatch) {
-      deptMatch = deptCache.byName.get(department.toLowerCase());
-    }
-
-    // Try partial match on FullyQualifiedName
-    if (!deptMatch) {
-      deptMatch = deptCache.items.find(d =>
-        d.FullyQualifiedName?.toLowerCase().includes(department.toLowerCase())
-      );
-    }
-
-    if (deptMatch) {
-      resolvedDepartmentId = deptMatch.Id;
-      resolvedDepartmentName = deptMatch.Name;
-    } else {
-      throw new Error(`Department not found: "${department}"`);
-    }
+  if (department && department.trim() !== "") {
+    const deptMatch = findDepartment(await getDepartmentCache(client), department);
+    if (!deptMatch) throw new Error(`Department not found: "${department}"`);
+    resolvedDepartmentId = deptMatch.Id;
+    resolvedDepartmentName = deptMatch.Name;
   }
 
   // Build date range
