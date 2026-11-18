@@ -26,9 +26,10 @@ data/
 .claude/rules/autonomy-conventions.md
 .claude/rules/markdown-*.md
 
-# Local-only issue/design capture, the Hive findings ledger and development-workflow plugin scratch (never sent to github)
+# Local-only issue/design capture, the Hive findings ledger, the local Hive workflow setup and development-workflow plugin scratch (never sent to github)
 docs/issues/
 docs/findings/
+workflow-setup.json
 .swarmbox/
 
 # MCP registry tokens
