@@ -315,6 +315,7 @@ The read-only set follows each tool's `readOnlyHint` annotation, so new tools ar
 | `QBO_SANDBOX` | `false` | Use QuickBooks sandbox environment. Also switches the "View in QuickBooks" deep links to `app.sandbox.qbo.intuit.com` so they cannot open the production company. |
 | `QBO_READ_ONLY` | `false` | Expose only tools that cannot change QuickBooks data. Accepts `1`/`true`/`yes`/`on` (on) and unset/empty/`0`/`false`/`no`/`off` (off), case-insensitive; any other value fails closed to on. Local re-authentication via `qbo_authenticate` stays allowed because it changes no QuickBooks data. See [Read-only mode](#read-only-mode). |
 | `QBO_ENABLED_TOOLS` | - | Comma-separated allowlist of tool names to expose (case-insensitive, e.g. `query,get_profit_loss`). Can be combined with `QBO_READ_ONLY`: with read-only on, it only narrows the read-only tools, and a listed write tool is refused as `disabled by QBO_READ_ONLY`. See [Read-only mode](#read-only-mode). |
+| `QBO_PDF_FILE_NAME` | `{date} {type} {ref}.pdf` | File-name template for `get_transaction_pdf`. Placeholders: `{date}` (TxnDate as `YYYYMMDD`), `{type}` (e.g. `Purchase Order`), `{ref}` (document number, falling back to the id), `{id}`. `.pdf` is added if missing; path separators in values become `-`. |
 | `AWS_REGION` | `us-east-2` | AWS region (aws mode) |
 | `QBO_SECRET_NAME` | `prod/qbo` | Secrets Manager secret name (aws mode) |
 | `QBO_COMPANY_ID_PARAM` | `/prod/qbo/company_id` | SSM parameter path (aws mode) |
@@ -392,6 +393,8 @@ The read-only set follows each tool's `readOnlyHint` annotation, so new tools ar
 | `get_attachment` | Fetch an attachment by ID: file name, size, note, category, links, and a temporary download URL (`download: true` saves the file locally in stdio mode) |
 | `list_attachments` | List the attachments linked to one transaction or entity |
 | `edit_attachment` | Edit an attachment's note, category or file name, and add, remove or re-flag its links |
+| **Documents** | |
+| `get_transaction_pdf` | Get QuickBooks' own PDF of a purchase order, invoice, estimate, sales receipt, credit memo or refund receipt. stdio saves it under `folder` (created if needed; default a new temp directory) and returns the path; HTTP returns it inline as a PDF resource (up to about 4.4 MB). File name from `QBO_PDF_FILE_NAME`. Read-only |
 
 ### Attachments
 

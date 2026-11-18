@@ -5,6 +5,11 @@
 import { REPORT_NAMES } from "../reports/catalog.js";
 import { CREATE_LINKED_TXN_TYPES } from "./handlers/bill-payment-links.js";
 import { addressSchema } from "../utils/address.js";
+import { LINK_TYPES } from "../utils/entity-types.js";
+
+// The transaction types QuickBooks renders a PDF for, read off the shared table so
+// the advertised enum and the handler's refusal cannot drift apart.
+const PDF_ENTITY_TYPES = Object.keys(LINK_TYPES).filter((k) => LINK_TYPES[k].pdf);
 
 // MCP tool annotations, which clients such as claude.ai and Claude Desktop use
 // to group a connector's tools into read-only and write permissions. Most are
@@ -2839,6 +2844,30 @@ export const toolDefinitions = [
         },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "get_transaction_pdf",
+    annotations: { title: "Get QuickBooks transaction PDF", ...READ },
+    description: `Get QuickBooks' own rendered PDF of one transaction. Supported types: ${PDF_ENTITY_TYPES.join(", ")}; other types (bill, expense, deposit, ...) have no PDF and are refused. In stdio mode the PDF is saved to disk and the text gives its absolute path (into folder, created if missing, or into a new temporary directory); an existing file of the same name is overwritten, and the text says so. Over HTTP nothing is written: the PDF comes back inline as an embedded resource block (mimeType application/pdf, uri qbo://<entity_type>/<id>/pdf, file name in _meta.fileName), refused above about 4.4 MB. The file name comes from the QBO_PDF_FILE_NAME environment variable, a template with the placeholders {date} (TxnDate as YYYYMMDD), {type} (e.g. Purchase Order), {ref} (document number, else the id) and {id}; the default is "{date} {type} {ref}.pdf". Read-only: QuickBooks is not changed. One transaction per call.`,
+    inputSchema: {
+      type: "object",
+      properties: {
+        entity_type: {
+          type: "string",
+          enum: PDF_ENTITY_TYPES,
+          description: "Type of the transaction.",
+        },
+        id: {
+          type: "string",
+          description: "The transaction ID (digits only).",
+        },
+        folder: {
+          type: "string",
+          description: "Local folder to save the PDF in, created if it does not exist (stdio mode only; refused over HTTP). Omit to use a new temporary directory.",
+        },
+      },
+      required: ["entity_type", "id"],
     },
   },
   {

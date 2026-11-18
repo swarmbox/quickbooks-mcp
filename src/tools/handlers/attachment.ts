@@ -17,6 +17,7 @@ import {
   mapWithConcurrency,
   outputReport,
 } from "../../utils/index.js";
+import { BY_QBO_TYPE, LINK_TYPES } from "../../utils/entity-types.js";
 
 // ---------------------------------------------------------------------------
 // Entity types an attachment can link to
@@ -27,32 +28,7 @@ interface LinkTypeConfig {
   label: string;
 }
 
-const LINK_TYPES: Record<string, LinkTypeConfig> = {
-  bill: { qboType: "Bill", label: "Bill" },
-  invoice: { qboType: "Invoice", label: "Invoice" },
-  expense: { qboType: "Purchase", label: "Expense" },
-  journal_entry: { qboType: "JournalEntry", label: "Journal Entry" },
-  deposit: { qboType: "Deposit", label: "Deposit" },
-  vendor_credit: { qboType: "VendorCredit", label: "Vendor Credit" },
-  sales_receipt: { qboType: "SalesReceipt", label: "Sales Receipt" },
-  bill_payment: { qboType: "BillPayment", label: "Bill Payment" },
-  estimate: { qboType: "Estimate", label: "Estimate" },
-  credit_memo: { qboType: "CreditMemo", label: "Credit Memo" },
-  payment: { qboType: "Payment", label: "Payment" },
-  refund_receipt: { qboType: "RefundReceipt", label: "Refund Receipt" },
-  purchase_order: { qboType: "PurchaseOrder", label: "Purchase Order" },
-  transfer: { qboType: "Transfer", label: "Transfer" },
-  vendor: { qboType: "Vendor", label: "Vendor" },
-  customer: { qboType: "Customer", label: "Customer" },
-  employee: { qboType: "Employee", label: "Employee" },
-  item: { qboType: "Item", label: "Item" },
-};
-
 export const ATTACHMENT_LINK_TYPES = Object.keys(LINK_TYPES);
-
-const BY_QBO_TYPE = new Map(
-  Object.values(LINK_TYPES).map((c) => [c.qboType.toLowerCase(), c])
-);
 
 // Accepts the tool's snake_case name ("expense") or the QBO type, in any case ("Purchase")
 export function resolveLinkType(entityType: string): LinkTypeConfig {
@@ -62,7 +38,7 @@ export function resolveLinkType(entityType: string): LinkTypeConfig {
       `Invalid entity_type "${entityType}". Must be one of: ${ATTACHMENT_LINK_TYPES.join(", ")}`
     );
   }
-  return config;
+  return { qboType: config.qboType, label: config.label };
 }
 
 function labelForQboType(qboType: string): string {
