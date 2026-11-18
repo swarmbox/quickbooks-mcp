@@ -692,7 +692,7 @@ export const toolDefinitions = [
   {
     name: "get_purchase_order",
     annotations: { title: "Get QuickBooks purchase order", ...READ },
-    description: "Fetch a single purchase order by ID with full details including SyncToken and line ids (needed for edits). Returns vendor, date, ref no., status, ship via, ship to, memo, vendor message, AP account, total, lines, linked transactions and attachments.",
+    description: "Fetch a single purchase order by ID with full details including SyncToken and line ids (needed for edits). Returns vendor, date, ref no., status, ship via, ship to, memo, vendor message, AP account, total, lines, linked transactions and attachments. Ship to rows past the fifth are stored on separate lines in QuickBooks, but the API returns them joined with spaces, so they read back as one line.",
     inputSchema: {
       type: "object",
       properties: {
@@ -708,7 +708,7 @@ export const toolDefinitions = [
     name: "edit_purchase_order",
     annotations: { title: "Edit QuickBooks purchase order", ...EDIT_LINES },
     description: "Modify an existing purchase order. Draft by default: the preview shows each change as before → after, and nothing is saved until draft=false. " +
-      "Only the fields you pass change. ship_to replaces the whole address (any city, state or postal code already on it is removed), and an empty ship_to (\"\" or []) clears it; ship_method: \"\" clears the ship via. " +
+      "Only the fields you pass change. ship_to replaces the whole address (any city, state or postal code already on it is removed), and an empty ship_to (\"\" or []) clears it; an edit without ship_to leaves the stored address untouched, so read-back text is never re-sent by accident. ship_to takes any number of rows, up to 2000 characters in total; rows past the fifth show on separate lines in QuickBooks but read back joined with spaces. ship_method: \"\" clears the ship via. " +
       "Vendor and item names must match exactly (case-insensitive); there is no partial matching. " +
       "A QuickBooks purchase order carries no due date, so a delivery date belongs in memo, vendor_message or a line description. " +
       "For lines: give line_id to change an existing line, omit it to append a new one, set delete=true to remove one; lines you do not name stay as they are. " +
@@ -748,7 +748,7 @@ export const toolDefinitions = [
         },
         ship_to: {
           anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-          description: "New ship-to address as one string with newlines, or an array of rows. It replaces the whole address, so give every row you want kept. Pass \"\" or [] to clear it. Rows are trimmed and blank rows dropped. At most 5 lines and 2000 characters in total; more is refused. Only the address lines are stored (no city or postal code fields).",
+          description: "New ship-to address as one string with newlines, or an array of rows. It replaces the whole address, so give every row you want kept. Pass \"\" or [] to clear it. Rows are trimmed and blank rows dropped. Any number of rows, up to 2000 characters in total (more is refused); rows past the fifth show on separate lines in QuickBooks but read back joined with spaces. Only the address lines are stored (no city or postal code fields).",
         },
         memo: {
           type: "string",
@@ -1065,7 +1065,7 @@ export const toolDefinitions = [
     description: "Create a vendor purchase order. Draft by default: the preview shows exactly what would be sent, and nothing is saved until draft=false. " +
       "Vendor and item names must match exactly (case-insensitive); there is no partial matching, and an item is named by its Parent:Child path, or by item_id. " +
       "A QuickBooks purchase order carries no due date, so a delivery date belongs in memo, vendor_message or a line description. " +
-      "ship_to keeps at most 5 lines and 2000 characters; a longer address is refused rather than folded. " +
+      "ship_to takes any number of rows, up to 2000 characters in total (more is refused); rows past the fifth show on separate lines in QuickBooks but read back joined with spaces. " +
       "A Ref no. another purchase order already uses is refused. After creating, QuickBooks' booking is compared with what was sent, and any difference is reported as an error (the purchase order still exists).",
     inputSchema: {
       type: "object",
@@ -1097,7 +1097,7 @@ export const toolDefinitions = [
         },
         ship_to: {
           anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
-          description: "Ship-to address as one string with newlines, or an array of rows. Rows are trimmed and blank rows dropped. At most 5 lines and 2000 characters in total; more is refused, so combine rows yourself. Only the address lines are stored (no city or postal code fields).",
+          description: "Ship-to address as one string with newlines, or an array of rows. Rows are trimmed and blank rows dropped. Any number of rows, up to 2000 characters in total (more is refused); rows past the fifth show on separate lines in QuickBooks but read back joined with spaces. Only the address lines are stored (no city or postal code fields).",
         },
         memo: {
           type: "string",

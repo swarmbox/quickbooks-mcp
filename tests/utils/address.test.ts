@@ -4,7 +4,14 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { buildQBAddress, formatAddress, addressSchema } from "../../src/utils/address.js";
+import {
+  buildQBAddress,
+  formatAddress,
+  addressSchema,
+  normalizeAddressRows,
+  freeFormAddress,
+  addressLinesMatch,
+} from "../../src/utils/address.js";
 import { toolDefinitions } from "../../src/tools/definitions.js";
 
 // Invented fixtures only — this repository is public (CLAUDE.md).
@@ -112,5 +119,68 @@ describe("address helpers", () => {
     assert.deepEqual(first, { type: "object", description: "Any text", properties: TODAY_PROPERTIES });
     assert.deepEqual(second, first);
     assert.notEqual(first, second, "addressSchema returns a fresh object on every call");
+  });
+});
+
+describe("free-form address helpers", () => {
+  it("address-rows-normalize: string, array and CRLF element give the same trimmed rows", () => {
+    const expected = ["Dock 4", "9 Beta Road", "Gate B"];
+    assert.deepEqual(normalizeAddressRows("  Dock 4 \n\n9 Beta Road\n   \nGate B  "), expected);
+    assert.deepEqual(normalizeAddressRows(["  Dock 4 ", "", "9 Beta Road", "   ", "Gate B  "]), expected);
+    assert.deepEqual(normalizeAddressRows(["Dock 4", "  9 Beta Road\r\n \r\nGate B "]), expected);
+    assert.deepEqual(normalizeAddressRows(undefined), []);
+    assert.deepEqual(normalizeAddressRows(""), []);
+    assert.deepEqual(normalizeAddressRows([]), []);
+  });
+
+  it("address-free-form-rows: rows 1-4 map to Line1-Line4, rows 5+ join into Line5", () => {
+    assert.deepEqual(freeFormAddress(["a", "b", "c", "d"], "ship_to"), {
+      Line1: "a", Line2: "b", Line3: "c", Line4: "d",
+    });
+    assert.deepEqual(freeFormAddress(["a", "b", "c", "d", "e"], "ship_to"), {
+      Line1: "a", Line2: "b", Line3: "c", Line4: "d", Line5: "e",
+    });
+    const seven = freeFormAddress(["a", "b", "c", "d", "e", "f", "g"], "ship_to");
+    assert.deepEqual(seven, {
+      Line1: "a", Line2: "b", Line3: "c", Line4: "d", Line5: "e\nf\ng",
+    });
+    assert.deepEqual(Object.keys(seven).sort(), ["Line1", "Line2", "Line3", "Line4", "Line5"]);
+  });
+
+  it("address-free-form-length: 2000 joined characters pass, 2001 throw naming field and limit", () => {
+    // Two rows joined with one "\n": 999 + 1 + 1000 = 2000.
+    const ok = ["x".repeat(999), "y".repeat(1000)];
+    assert.equal(ok.join("\n").length, 2000);
+    assert.ok(freeFormAddress(ok, "ship_to").Line1);
+
+    const over = ["x".repeat(1000), "y".repeat(1000)];
+    assert.equal(over.join("\n").length, 2001);
+    assert.throws(
+      () => freeFormAddress(over, "ship_to"),
+      (err: Error) =>
+        /ship_to/.test(err.message) && /2000/.test(err.message) && !/combine/i.test(err.message)
+    );
+  });
+
+  it("address-lines-match-whitespace: whitespace runs collapse; missing or differing lines do not match", () => {
+    const sent = { Line1: "a", Line2: "b", Line5: "e\nf\ng" };
+    assert.equal(addressLinesMatch(sent, { Line1: "a", Line2: "b", Line5: "e f g" }), true);
+    assert.equal(addressLinesMatch(sent, { Line1: " a ", Line2: "b", Line5: "e\r\n f\t g" }), true);
+    assert.equal(addressLinesMatch({ Line1: "a" }, { Line1: "a", Line2: "" }), true);
+    assert.equal(addressLinesMatch({ Line1: "a", City: "X" }, { Line1: "a", Id: "9" } as never), true);
+
+    assert.equal(addressLinesMatch(sent, { Line1: "a", Line2: "b" }), false);
+    assert.equal(addressLinesMatch(sent, { Line1: "a", Line2: "B", Line5: "e f g" }), false);
+    assert.equal(addressLinesMatch({ Line1: "a" }, { Line1: "a", Line2: "extra" }), false);
+  });
+
+  it("address-format-splits-newlines: a Line5 with newlines renders one indented line per row", () => {
+    assert.deepEqual(formatAddress({ Line1: "a", Line5: "e\nf\ng" }, "Ship to"), [
+      "Ship to:",
+      "  a",
+      "  e",
+      "  f",
+      "  g",
+    ]);
   });
 });
