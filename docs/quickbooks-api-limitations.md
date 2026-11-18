@@ -191,6 +191,7 @@ When performing sparse updates (`sparse: true`), certain fields are **required**
 | Entity | Required Fields | Notes |
 |--------|-----------------|-------|
 | **JournalEntry** | `Id`, `SyncToken` | Minimal requirements |
+| **PurchaseOrder** | `Id`, `SyncToken` | Minimal requirements (no `VendorRef`, unlike Bill) |
 | **Bill** | `Id`, `SyncToken`, `VendorRef` | Must include vendor reference |
 | **Purchase** (Expense) | `Id`, `SyncToken`, `PaymentType` | PaymentType cannot be changed, but must be included |
 | **Deposit** | `Id`, `SyncToken`, `DepositToAccountRef` | Must include the deposit-to account |
@@ -1144,6 +1145,72 @@ parent rename rewrites every child's path and a deactivation cascades.
 - **AcctNum limits outside the US.** Only a US company with account numbers
   turned on was probed; other regions may allow different lengths or
   characters.
+
+## Purchase Orders
+
+### Verified in a sandbox company (2026-11-18)
+
+- **No due date.** `DueDate` and `SalesTermRef` are accepted and silently dropped
+  on create and update. `ShipDate` is refused (2010).
+- **`ShipMethodRef` is a free string.** `{value: "X"}` is stored as
+  `{value: "X", name: "X"}`; there is no list, and `{value: ""}` clears it.
+- **`ShipAddr` holds `Line1`-`Line5`.** `Line6` is refused (2010). An embedded
+  newline is split across the following lines, and rows past the fifth are
+  folded onto `Line5` with spaces. The joined lines must be 2000 characters or
+  fewer (fault 6000), and `City` 255 or fewer. A sparse update replaces the
+  whole `ShipAddr`, and `{}` clears it.
+- **A duplicate `DocNumber` is accepted** when custom transaction numbers are
+  off. The length limit is 21 characters (22 gives 2050).
+- **Line `Description` is 4000 characters or fewer** (4001 gives 2050); newlines
+  are preserved.
+- **Both line types work.** `ItemBasedExpenseLineDetail` and
+  `AccountBasedExpenseLineDetail` are accepted, and line `ClassRef` and
+  `CustomerRef` round-trip.
+  An item line whose item has no purchase (expense) account is refused with
+  fault 6000, "Select an account for this transaction"; the tools surface that
+  fault as it is.
+- **`APAccountRef` is optional**; QuickBooks fills in the default.
+- **A header `ClassRef` is silently dropped** when class is tracked per line.
+- **`POStatus` is writable:** `Open` on create, and `Closed` then `Open` on
+  update.
+- **A sparse update needs only `Id` and `SyncToken`.**
+- **`Memo` (the vendor message) and `PrivateNote` round-trip.**
+- **Delete takes a minimal `{Id, SyncToken}`.**
+- **An inactive item is renamed with a `(deleted)` suffix** and is absent from a
+  `Name` query unless `Active = false` is asked for.
+
+### How the purchase-order tools use this
+
+- `due_date`, `sales_term_ref` and `department_name` are not offered; the
+  validator refuses them as unknown keys.
+- `ship_to` is normalized client-side (split on newlines, trimmed, blank rows
+  dropped) and refused over 5 lines or 2000 characters, rather than letting
+  QuickBooks re-fold it. On edit it is a whole replacement; `""` or `[]` clears
+  it.
+- A `doc_number` another purchase order already uses is refused with a query, in
+  draft and on commit; length and description limits are checked client-side.
+- `edit_purchase_order` sends only the changed fields, and refuses an edit that
+  would delete every line.
+- Vendors and items match **exactly**, unlike the other tools' partial
+  matching, which takes the first partial hit. A `Parent:Child` item path is
+  filtered client-side, so the resolver never depends on querying
+  `FullyQualifiedName`; an ambiguous name lists its
+  candidates, and an inactive exact match is reported as inactive.
+- After a commit the booked record is compared with what was sent. A difference
+  is returned as an error headed `NOT AS PREVIEWED`; nothing is undone.
+- `delete_entity` accepts `purchase_order`.
+
+### Unverified
+
+- **Header `DepartmentRef`.** The sandbox had location tracking off and its
+  preference writes were refused, so a department on a purchase order was never
+  tested. The tools do not offer it until it is verified against a
+  location-tracked company.
+- **Querying `FullyQualifiedName` on items.** Not probed; the resolver filters
+  client-side instead.
+- **The app deep-link route** for a purchase order. `buildQboUrl` has no
+  purchase-order mapping, so the purchase-order tools print no "View in
+  QuickBooks" link until the route is verified.
 
 ## References
 

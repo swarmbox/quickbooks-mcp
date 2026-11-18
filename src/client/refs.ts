@@ -167,6 +167,37 @@ export function resolveVendorRef(cache: VendorCache, nameOrId: string): VendorRe
   throw new Error(`Vendor not found: "${nameOrId}"`);
 }
 
+// Resolve a vendor with no guessing, for tools that book a transaction to it.
+//
+// Why this exists: resolveVendorRef falls through to a partial DisplayName match,
+// so a typo or a short name can land on the wrong vendor. This one never does.
+//
+// The caller names the route, because an all-digit vendor name is
+// indistinguishable from an Id by shape: "id" matches only an Id, "name" matches
+// only an exact DisplayName (trimmed, case-insensitive) and never consults Ids.
+// A miss on either route throws, quoting the input.
+export function resolveVendorRefExact(
+  cache: VendorCache,
+  ref: string,
+  by: "id" | "name"
+): VendorRef {
+  const wanted = ref.trim();
+  if (by === "id") {
+    const match = cache.byId.get(wanted);
+    if (!match) throw new Error(`No vendor has id "${ref}".`);
+    return { value: match.Id, name: match.DisplayName };
+  }
+
+  const key = wanted.toLowerCase();
+  const match = cache.items.find(v => v.DisplayName.trim().toLowerCase() === key);
+  if (!match) {
+    throw new Error(
+      `No vendor matches "${ref}" exactly. Use the exact vendor display name, or vendor_id.`
+    );
+  }
+  return { value: match.Id, name: match.DisplayName };
+}
+
 // Resolve a payment term by internal Id, then exact name (case-insensitive).
 // There is deliberately no partial tier: a fuzzy hit would pick the wrong term
 // and silently move a due date, and the miss error lists the exact names so a

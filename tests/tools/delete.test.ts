@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import type QuickBooks from "node-quickbooks";
 
 import { handleDeleteEntity } from "../../src/tools/handlers/delete.js";
+import { toolDefinitions } from "../../src/tools/definitions.js";
 
 type Callback<T> = (err: unknown, result: T) => void;
 
@@ -107,5 +108,63 @@ describe("handleDeleteEntity", () => {
       /Invalid entity_type/
     );
     assert.equal(calls.reads.length, 0);
+  });
+});
+
+const PO_600 = {
+  Id: "600",
+  SyncToken: "2",
+  TxnDate: "2026-11-02",
+  DocNumber: "PO1001",
+  POStatus: "Open",
+  VendorRef: { value: "20", name: "North Freight" },
+  PrivateNote: "Load 1",
+  TotalAmt: 150,
+};
+
+function poClient() {
+  const calls: { deleted: unknown[] } = { deleted: [] };
+  const client = {
+    getPurchaseOrder: (_id: string, cb: Callback<unknown>) => cb(null, structuredClone(PO_600)),
+    deletePurchaseOrder: (body: unknown, cb: Callback<unknown>) => {
+      calls.deleted.push(body);
+      cb(null, { PurchaseOrder: { Id: "600", status: "Deleted" } });
+    },
+  } as unknown as QuickBooks;
+  return { client, calls };
+}
+
+describe("handleDeleteEntity purchase orders", () => {
+  it("delete-po-preview — describes the purchase order and writes nothing", async () => {
+    const { client, calls } = poClient();
+    const result = await handleDeleteEntity(client, { entity_type: "purchase_order", id: "600" });
+    const text = result.content[0].text;
+    assert.ok(text.includes("Purchase Order #600 — North Freight"), text);
+    assert.ok(text.includes("PO1001"), text);
+    assert.ok(text.includes("Open"), text);
+    assert.ok(text.includes("permanently delete this purchase order"), text);
+    assert.equal(calls.deleted.length, 0);
+  });
+
+  it("delete-po-confirm — deletes with exactly Id and SyncToken", async () => {
+    const { client, calls } = poClient();
+    const result = await handleDeleteEntity(client, { entity_type: "purchase_order", id: "600", confirm: true });
+    assert.deepEqual(calls.deleted, [{ Id: "600", SyncToken: "2" }]);
+    assert.equal(result.content[0].text, "Deleted Purchase Order #600.");
+  });
+
+  it("delete-po-enum — the schema names purchase orders and get_purchase_order is a read tool", () => {
+    const del = toolDefinitions.find(t => t.name === "delete_entity")!;
+    const enumValues = (del.inputSchema as any).properties.entity_type.enum as string[];
+    assert.ok(enumValues.includes("purchase_order"));
+    const get = toolDefinitions.find(t => t.name === "get_purchase_order");
+    assert.ok(get, "get_purchase_order is defined");
+    assert.deepEqual(get!.annotations, {
+      title: "Get QuickBooks purchase order",
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    });
   });
 });

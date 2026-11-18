@@ -4,7 +4,7 @@ import QuickBooks from "node-quickbooks";
 import { promisify, promisifyWrite } from "../../client/index.js";
 import { formatDollars, toCents } from "../../utils/index.js";
 
-type EntityType = "journal_entry" | "bill" | "invoice" | "deposit" | "sales_receipt" | "expense" | "vendor_credit" | "bill_payment" | "attachable";
+type EntityType = "journal_entry" | "bill" | "invoice" | "deposit" | "sales_receipt" | "expense" | "vendor_credit" | "bill_payment" | "purchase_order" | "attachable";
 
 interface EntityConfig {
   getMethod: string;
@@ -124,6 +124,21 @@ const ENTITY_CONFIG: Record<EntityType, EntityConfig> = {
       const lines = [`Vendor Credit #${e.Id} — ${vendor}`];
       lines.push(`  Date: ${e.TxnDate}`);
       if (e.DocNumber) lines.push(`  Ref no.: ${e.DocNumber}`);
+      if (e.TotalAmt != null) lines.push(`  Total: $${formatDollars(toCents(e.TotalAmt as number))}`);
+      if (e.PrivateNote) lines.push(`  Memo: ${e.PrivateNote}`);
+      return lines.join("\n");
+    },
+  },
+  purchase_order: {
+    getMethod: "getPurchaseOrder",
+    deleteMethod: "deletePurchaseOrder",
+    label: "Purchase Order",
+    formatSummary: (e) => {
+      const vendor = (e.VendorRef as Record<string, string>)?.name || "(no vendor)";
+      const lines = [`Purchase Order #${e.Id} — ${vendor}`];
+      lines.push(`  Date: ${e.TxnDate}`);
+      if (e.DocNumber) lines.push(`  Ref no.: ${e.DocNumber}`);
+      if (e.POStatus) lines.push(`  Status: ${e.POStatus}`);
       if (e.TotalAmt != null) lines.push(`  Total: $${formatDollars(toCents(e.TotalAmt as number))}`);
       if (e.PrivateNote) lines.push(`  Memo: ${e.PrivateNote}`);
       return lines.join("\n");

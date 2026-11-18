@@ -346,6 +346,9 @@ The read-only set follows each tool's `readOnlyHint` annotation, so new tools ar
 | `create_bill` | Create a vendor bill (lines take an account or an item, plus `class_name` and `customer_name`; `sales_term_ref` sets payment terms and computes the due date when `due_date` is omitted) |
 | `get_bill` | Fetch a bill by ID, including its payment terms |
 | `edit_bill` | Modify an existing bill (`sales_term_ref` changes its payment terms and recomputes the due date unless `due_date` is given) |
+| `create_purchase_order` | Create a purchase order, draft-first. Vendor and item names must match exactly (or pass `vendor_id` / `item_id`). `ship_to` is a string or array, at most 5 lines and 2000 characters. A `doc_number` another PO already uses is refused. A PO has no due date, so `due_date` and `sales_term_ref` are not offered; put a delivery date in the memo or a line description. A commit QuickBooks books differently from the preview is reported as an error |
+| `get_purchase_order` | Fetch a purchase order by ID, with line IDs, ship-to, linked transactions and attachments |
+| `edit_purchase_order` | Sparse-update a purchase order: header fields, `status` (`Open` / `Closed`) and lines. `ship_to` replaces the whole address (`""` clears it). An edit that would delete every line is refused |
 | **Expenses** | |
 | `create_expense` | Create an expense (Cash, Check, or Credit Card; payee may be a vendor, customer, or employee; lines take an account or an item, plus `class_name`) |
 | `get_expense` | Fetch an expense by ID |
@@ -382,7 +385,7 @@ The read-only set follows each tool's `readOnlyHint` annotation, so new tools ar
 | `create_vendor` | Create a vendor (name parts, title, company, contact info, `bill_address`, `sales_term_ref`, `vendor_1099`); draft-first. A display name already used by a customer, vendor or employee is refused before any write, naming each holder's list, id and stored name; the tool applies no naming convention and never renames or suffixes the name |
 | `edit_vendor` | Sparse-update a vendor: name parts, contact info, `bill_address` (merged over the stored address), payment terms, 1099 flag; `active: false` deactivates it. A rename to a name another customer, vendor or employee uses is refused, naming each holder; the tool applies no naming convention. Read vendors with `query` |
 | **Delete** | |
-| `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment) or an attachment (`entity_type: attachable`) |
+| `delete_entity` | Delete any transaction (journal entry, bill, invoice, deposit, sales receipt, expense, vendor credit, bill payment, purchase order) or an attachment (`entity_type: attachable`) |
 | **Attachments** | |
 | `upload_attachment` | Upload a file (PDF, image, spreadsheet, etc.) and attach it to one or more transactions or entities; warns when a same-named file is already attached |
 | `create_attachment_note` | Attach a text note (no file) to one or more transactions or entities |
@@ -407,9 +410,9 @@ actually store there:
 |-----------|------------------|---------|
 | `entity_name` + `entity_type` | `create_deposit` / `edit_deposit` lines, `create_journal_entry` / `edit_journal_entry` lines, `create_expense` / `edit_expense` header payee | Vendor, Customer, or Employee. `entity_type` defaults to `Vendor`. |
 | `customer_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_vendor_credit` / `edit_vendor_credit` lines | Customer only — QuickBooks stores a `CustomerRef` on these lines and has no vendor or employee option. |
-| `vendor_name` | `create_bill`, `create_vendor_credit`, `create_bill_payment` headers | Vendor only. |
+| `vendor_name` | `create_bill`, `create_vendor_credit`, `create_bill_payment`, `create_purchase_order` / `edit_purchase_order` headers | Vendor only. The PO tools match the name exactly (case-insensitive) and refuse a partial match; the others take the first partial match. |
 | `customer_name` (header) | `create_invoice`, `create_sales_receipt` | Customer only. Their item lines have no per-line entity. |
-| `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. |
+| `item_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_purchase_order` / `edit_purchase_order` lines | An Item, posting the line as `ItemBasedExpenseLineDetail` instead of against a GL account. Mutually exclusive with `account_name` on the same line. The PO tools match exactly (a `Parent:Child` path must match in full) and refuse an ambiguous or inactive item. |
 | `class_name` | `create_bill` / `edit_bill`, `create_expense` / `edit_expense`, `create_journal_entry` / `edit_journal_entry` lines | A Class. Line-level, and distinct from the header-level `department_name` — QuickBooks stores it inside whichever line detail the line uses. |
 | `sales_term_ref` | `create_bill` / `edit_bill`, `create_invoice` / `edit_invoice`, `create_customer` / `edit_customer` headers | A Term, by exact name (case-insensitive) or Id; a miss lists the available names. On bills a missing `due_date` is computed from it (`txn_date` plus the term's days); an explicit `due_date` is kept, and date-driven terms need `due_date`. |
 

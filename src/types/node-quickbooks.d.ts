@@ -47,6 +47,7 @@ declare module "node-quickbooks" {
     findAccounts(criteria: object | string, callback: Callback<unknown>): void;
     findInvoices(criteria: object | string, callback: Callback<unknown>): void;
     findBills(criteria: object | string, callback: Callback<unknown>): void;
+    findPurchaseOrders(criteria: object | string, callback: Callback<unknown>): void;
 
     // Attachable: an uploaded file or a text-only note, linked to entities
     // through AttachableRef. `upload` posts multipart to /upload and creates an
@@ -86,6 +87,7 @@ declare module "node-quickbooks" {
 
     // Create methods
     createBill(bill: object, callback: Callback<unknown>): void;
+    createPurchaseOrder(purchaseOrder: object, callback: Callback<unknown>): void;
     createDeposit(deposit: object, callback: Callback<unknown>): void;
     createJournalEntry(journalEntry: object, callback: Callback<unknown>): void;
     createPurchase(purchase: object, callback: Callback<unknown>): void;
@@ -100,6 +102,7 @@ declare module "node-quickbooks" {
     // Get methods (single entity by ID)
     getJournalEntry(id: string, callback: Callback<unknown>): void;
     getBill(id: string, callback: Callback<unknown>): void;
+    getPurchaseOrder(id: string, callback: Callback<unknown>): void;
     getPurchase(id: string, callback: Callback<unknown>): void;
     getSalesReceipt(id: string, callback: Callback<unknown>): void;
     getInvoice(id: string, callback: Callback<unknown>): void;
@@ -113,6 +116,7 @@ declare module "node-quickbooks" {
     // Update methods
     updateJournalEntry(journalEntry: object, callback: Callback<unknown>): void;
     updateBill(bill: object, callback: Callback<unknown>): void;
+    updatePurchaseOrder(purchaseOrder: object, callback: Callback<unknown>): void;
     updatePurchase(purchase: object, callback: Callback<unknown>): void;
     updateSalesReceipt(salesReceipt: object, callback: Callback<unknown>): void;
     updateInvoice(invoice: object, callback: Callback<unknown>): void;
@@ -126,6 +130,7 @@ declare module "node-quickbooks" {
     // Delete methods
     deleteJournalEntry(idOrEntity: object | string, callback: Callback<unknown>): void;
     deleteBill(idOrEntity: object | string, callback: Callback<unknown>): void;
+    deletePurchaseOrder(idOrEntity: object | string, callback: Callback<unknown>): void;
     deleteInvoice(idOrEntity: object | string, callback: Callback<unknown>): void;
     deleteDeposit(idOrEntity: object | string, callback: Callback<unknown>): void;
     deleteSalesReceipt(idOrEntity: object | string, callback: Callback<unknown>): void;

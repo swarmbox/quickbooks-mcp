@@ -351,6 +351,94 @@ export async function resolveVendor(client: QuickBooks, nameOrId: string): Promi
   throw new Error(`Vendor not found: "${nameOrId}". Try using vendor display name or ID.`);
 }
 
+type ItemRow = { Id: string; Name: string; FullyQualifiedName?: string; Active?: boolean };
+
+// Resolve an item with no guessing, for tools that book a transaction to it.
+//
+// Why this exists: resolveItem tries an exact name, then an Id, then a LIKE
+// substring and takes the first hit, so a short or mistyped name can land on the
+// wrong item.
+// This one never issues a LIKE and never compares by substring.
+//
+// The caller names the route, because an all-digit item name is indistinguishable
+// from an Id by shape: "id" matches only an Id (no name fallback), "name" never
+// consults Ids.
+//
+// Name route: QBO is asked for active items whose Name equals the last
+// ":"-separated segment of the input, and the rows are then filtered here. A ref
+// containing ":" must equal the item's FullyQualifiedName; a ref without one must
+// equal its Name (trimmed, case-insensitive both ways). The path is deliberately
+// filtered client-side instead of queried on FullyQualifiedName: correctness then
+// does not depend on QBO supporting that filter, and no sandbox sub-item was
+// available to verify it does. More than one hit is refused with every
+// candidate listed. With no active hit, one Active = false lookup separates "this
+// item is inactive" from "no such item"; QBO renames an inactive item to
+// "<Name> (deleted)", so that suffix is stripped before comparing.
+//
+// Not cached: a purchase order books to exactly the record named, and a stale
+// cache entry is how an inactive item would slip through.
+export async function resolveItemExact(
+  client: QuickBooks,
+  ref: string,
+  by: "id" | "name"
+): Promise<{ value: string; name: string }> {
+  const wanted = ref.trim();
+  const toRef = (item: ItemRow) => ({ value: item.Id, name: item.FullyQualifiedName ?? item.Name });
+  const query = async (criteria: Array<{ field: string; value: string | boolean; operator: string }>) =>
+    extractQueryResults<ItemRow>(await promisify<unknown>((cb) => client.findItems(criteria, cb)), 'Item');
+
+  if (by === "id") {
+    const active = (await query([{ field: 'Id', value: wanted, operator: '=' }])).filter(i => i.Active !== false);
+    if (active.length > 0) return toRef(active[0]);
+
+    const inactive = await query([
+      { field: 'Id', value: wanted, operator: '=' },
+      { field: 'Active', value: false, operator: '=' },
+    ]);
+    if (inactive.length > 0) throw new Error(inactiveItemMessage(ref, inactive[0]));
+    throw new Error(`No item has id "${ref}".`);
+  }
+
+  const leaf = (wanted.split(':').pop() ?? '').trim();
+  const key = wanted.toLowerCase();
+  const matches = (item: ItemRow, strip: boolean): boolean => {
+    const unsuffixed = (s: string) => (strip ? s.replace(/\s\(deleted\)$/i, '') : s).trim().toLowerCase();
+    return wanted.includes(':')
+      ? unsuffixed(item.FullyQualifiedName ?? '') === key
+      : unsuffixed(item.Name) === key;
+  };
+
+  const hits = (await query([
+    { field: 'Name', value: leaf, operator: '=' },
+    { field: 'Active', value: true, operator: '=' },
+  ])).filter(i => i.Active !== false && matches(i, false));
+
+  if (hits.length === 1) return toRef(hits[0]);
+  if (hits.length > 1) {
+    throw new Error(
+      [
+        `The item "${ref}" matches more than one item:`,
+        ...hits.map(i => `  ${toRef(i).name} (id ${i.Id})`),
+        "Use the item Id, or the full path (Parent:Child), to choose one.",
+      ].join("\n")
+    );
+  }
+
+  const inactive = (await query([
+    { field: 'Name', value: `${leaf} (deleted)`, operator: '=' },
+    { field: 'Active', value: false, operator: '=' },
+  ])).filter(i => matches(i, true));
+  if (inactive.length > 0) throw new Error(inactiveItemMessage(ref, inactive[0]));
+
+  throw new Error(
+    `No item matches "${ref}" exactly. Use the exact item name, the full Parent:Child path, or item_id.`
+  );
+}
+
+function inactiveItemMessage(ref: string, item: ItemRow): string {
+  return `Item "${ref}" is inactive (id ${item.Id}). Reactivate it in QuickBooks or choose another item.`;
+}
+
 // Resolve item by name or ID using lazy per-entry cache
 // Unlike other caches, items are fetched on demand (companies can have thousands)
 export async function resolveItem(client: QuickBooks, nameOrId: string): Promise<{ value: string; name: string }> {

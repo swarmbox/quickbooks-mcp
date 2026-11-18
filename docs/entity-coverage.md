@@ -130,7 +130,8 @@ does the aging arithmetic.
 | CreditCardPayment | ✅ | `CreditCardAccountRef` (debit) + `BankAccountRef` (credit) |
 | TaxPayment | ❌ | posting, line shape unverified |
 | InventoryAdjustment | ❌ | posting, line shape unverified |
-| Estimate, PurchaseOrder, TimeActivity | ❌ | non-posting by design |
+| Estimate, TimeActivity | ❌ | non-posting by design |
+| PurchaseOrder | ❌ | non-posting by design. Has `create_purchase_order`, `get_purchase_order`, `edit_purchase_order` and `delete_entity` support, but never appears in the account drill-down |
 | RecurringTransaction | ❌ | template, not a transaction |
 
 Every call reports `coverage.scannedEntityTypes` in its report data (stdio only —

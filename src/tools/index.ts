@@ -25,6 +25,9 @@ import {
   handleCreateBill,
   handleGetBill,
   handleEditBill,
+  handleCreatePurchaseOrder,
+  handleGetPurchaseOrder,
+  handleEditPurchaseOrder,
   handleCreateExpense,
   handleGetExpense,
   handleEditExpense,
@@ -86,6 +89,9 @@ toolHandlers.set("edit_journal_entry", (client, args) => handleEditJournalEntry(
 toolHandlers.set("create_bill", (client, args) => handleCreateBill(client, args as Parameters<typeof handleCreateBill>[1]));
 toolHandlers.set("get_bill", (client, args) => handleGetBill(client, args as { id: string }));
 toolHandlers.set("edit_bill", (client, args) => handleEditBill(client, args as Parameters<typeof handleEditBill>[1]));
+toolHandlers.set("create_purchase_order", (client, args) => handleCreatePurchaseOrder(client, args as Parameters<typeof handleCreatePurchaseOrder>[1]));
+toolHandlers.set("get_purchase_order", (client, args) => handleGetPurchaseOrder(client, args as Parameters<typeof handleGetPurchaseOrder>[1]));
+toolHandlers.set("edit_purchase_order", (client, args) => handleEditPurchaseOrder(client, args as Parameters<typeof handleEditPurchaseOrder>[1]));
 toolHandlers.set("create_expense", (client, args) => handleCreateExpense(client, args as Parameters<typeof handleCreateExpense>[1]));
 toolHandlers.set("get_expense", (client, args) => handleGetExpense(client, args as { id: string }));
 toolHandlers.set("edit_expense", (client, args) => handleEditExpense(client, args as Parameters<typeof handleEditExpense>[1]));
