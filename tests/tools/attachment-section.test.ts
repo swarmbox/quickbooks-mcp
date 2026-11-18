@@ -18,6 +18,7 @@ import { handleGetJournalEntry } from "../../src/tools/handlers/journal-entry.js
 import { handleGetVendorCredit } from "../../src/tools/handlers/vendor-credit.js";
 import { handleGetBillPayment } from "../../src/tools/handlers/bill-payment.js";
 import { handleGetCustomer } from "../../src/tools/handlers/customer.js";
+import { handleGetPurchaseOrder } from "../../src/tools/handlers/purchase-order.js";
 import { formatAttachmentLines } from "../../src/tools/handlers/attachment.js";
 
 type Callback<T> = (err: unknown, result: T) => void;
@@ -144,4 +145,21 @@ describe("get tools query their own entity type", () => {
       assert.ok(text.indexOf("Attachment 9:") < text.lastIndexOf("View in QuickBooks:"));
     });
   }
+});
+
+// get_purchase_order carries no QBO deep link (no "View in QuickBooks" line), so
+// it sits outside the CASES table, whose ordering assertion depends on one.
+describe("get_purchase_order attachments section", () => {
+  it("get-po-queries-own-type", async () => {
+    const po = { Id: "20", SyncToken: "0", TxnDate: "2026-01-15", Line: [] };
+    const { client, queries } = fakeClient("getPurchaseOrder", po, () => ATTACHABLES);
+    const text = textOf(await handleGetPurchaseOrder(client, { id: "20" }));
+
+    assert.equal(queries.length, 1, "exactly one attachments lookup");
+    const criteria = String(queries[0]);
+    assert.ok(criteria.includes("AttachableRef.EntityRef.Type = 'purchaseorder'"), criteria);
+    assert.ok(criteria.includes("AttachableRef.EntityRef.value = '20'"), criteria);
+    assert.match(text, /Attachment 9: statement\.pdf/);
+    assert.doesNotMatch(text, /View in QuickBooks/);
+  });
 });

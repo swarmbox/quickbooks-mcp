@@ -10,3 +10,4 @@ export * from './updates.js';
 export * from './item-line.js';
 export * from './dates.js';
 export * from './address.js';
+export * from './booked.js';

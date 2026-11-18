@@ -26,6 +26,7 @@ export {
   resolveAccount,
   resolveVendor,
   resolveItem,
+  resolveItemExact,
   resolveCustomer,
   resolveDepartmentId,
   collectAccountTree,
@@ -33,6 +34,7 @@ export {
 export {
   resolveAccountRef,
   resolveVendorRef,
+  resolveVendorRefExact,
   resolveEmployeeRef,
   resolveTermRef,
   termDueDays,

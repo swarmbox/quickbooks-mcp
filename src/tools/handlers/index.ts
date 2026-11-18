@@ -20,6 +20,7 @@ export {
   handleEditJournalEntry,
 } from './journal-entry.js';
 export { handleCreateBill, handleGetBill, handleEditBill } from './bill.js';
+export { handleCreatePurchaseOrder, handleGetPurchaseOrder, handleEditPurchaseOrder } from './purchase-order.js';
 export { handleCreateExpense, handleGetExpense, handleEditExpense } from './expense.js';
 export { handleCreateSalesReceipt, handleGetSalesReceipt, handleEditSalesReceipt } from './sales-receipt.js';
 export { handleCreateInvoice, handleGetInvoice, handleEditInvoice } from './invoice.js';

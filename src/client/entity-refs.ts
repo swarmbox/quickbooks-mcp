@@ -20,7 +20,7 @@
 // a blank name.
 
 import QuickBooks from "node-quickbooks";
-import { getVendorCache, getEmployeeCache, resolveCustomer, resolveItem } from "./cache.js";
+import { getVendorCache, getEmployeeCache, resolveCustomer, resolveItem, resolveItemExact } from "./cache.js";
 import { resolveVendorRef, resolveEmployeeRef, resolveClassRef, resolveDepartmentRef, normalizeEntityKind } from "./refs.js";
 import type { EntityKind, ResolvedEntityRef } from "./refs.js";
 import type { ClassCache, DepartmentCache } from "../types/index.js";
@@ -130,15 +130,24 @@ export async function resolveEntityInput(
 // Resolve an item_name/item_id pair for the expense line details that can post
 // against an Item instead of an Account. Async because items are looked up
 // lazily by query rather than bulk-cached.
+//
+// With `exact`, resolution goes through resolveItemExact instead of the loose
+// resolveItem: item_id takes the Id route and item_name the name route, so the
+// two parameters never cross, and a partial or ambiguous name is refused. The
+// label prefix is the same in both modes. Without the option nothing changes.
 export async function resolveItemInput(
   client: QuickBooks,
   input: ItemLineInput,
-  label: string
+  label: string,
+  options?: { exact?: boolean }
 ): Promise<EntityInputResult<{ value: string; name: string }>> {
   const raw = input.item_id ?? input.item_name;
   if (raw === undefined) return undefined;
   if (raw.trim() === "") return null;
   try {
+    if (options?.exact) {
+      return await resolveItemExact(client, raw, input.item_id !== undefined ? "id" : "name");
+    }
     return await resolveItem(client, raw);
   } catch (err) {
     throw withLabel(label, err);

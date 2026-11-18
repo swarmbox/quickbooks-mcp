@@ -685,6 +685,144 @@ export const toolDefinitions = [
     },
   },
   {
+    name: "get_purchase_order",
+    annotations: { title: "Get QuickBooks purchase order", ...READ },
+    description: "Fetch a single purchase order by ID with full details including SyncToken and line ids (needed for edits). Returns vendor, date, ref no., status, ship via, ship to, memo, vendor message, AP account, total, lines, linked transactions and attachments.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "The purchase order ID",
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
+    name: "edit_purchase_order",
+    annotations: { title: "Edit QuickBooks purchase order", ...EDIT_LINES },
+    description: "Modify an existing purchase order. Draft by default: the preview shows each change as before → after, and nothing is saved until draft=false. " +
+      "Only the fields you pass change. ship_to replaces the whole address (any city, state or postal code already on it is removed), and an empty ship_to (\"\" or []) clears it; ship_method: \"\" clears the ship via. " +
+      "Vendor and item names must match exactly (case-insensitive); there is no partial matching. " +
+      "A QuickBooks purchase order carries no due date, so a delivery date belongs in memo, vendor_message or a line description. " +
+      "For lines: give line_id to change an existing line, omit it to append a new one, set delete=true to remove one; lines you do not name stay as they are. " +
+      "A Ref no. another purchase order already uses is refused, and doc_number cannot be cleared. " +
+      "After saving, QuickBooks' booking is compared with what was sent, and any difference is reported as an error (the purchase order is still updated).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Purchase order ID to edit",
+        },
+        vendor_name: {
+          type: "string",
+          description: "New vendor display name, matched exactly (case-insensitive, trimmed); a partial name is refused. Use vendor_id if you know it.",
+        },
+        vendor_id: {
+          type: "string",
+          description: "New vendor ID (matched as an Id only, never as a name)",
+        },
+        txn_date: {
+          type: "string",
+          description: "New purchase order date in YYYY-MM-DD format",
+        },
+        doc_number: {
+          type: "string",
+          description: "New reference number (1-21 characters). A number another purchase order uses is refused; the purchase order's own number is fine. It cannot be cleared.",
+        },
+        status: {
+          type: "string",
+          enum: ["Open", "Closed"],
+          description: "New purchase order status",
+        },
+        ship_method: {
+          type: "string",
+          description: "New ship via, free text (e.g., 'Truck'). Pass \"\" to clear it.",
+        },
+        ship_to: {
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+          description: "New ship-to address as one string with newlines, or an array of rows. It replaces the whole address, so give every row you want kept. Pass \"\" or [] to clear it. Rows are trimmed and blank rows dropped. At most 5 lines and 2000 characters in total; more is refused. Only the address lines are stored (no city or postal code fields).",
+        },
+        memo: {
+          type: "string",
+          description: "New private memo (not printed for the vendor). Pass \"\" to clear it.",
+        },
+        vendor_message: {
+          type: "string",
+          description: "New message to the vendor, printed on the purchase order (QuickBooks field Memo). Pass \"\" to clear it.",
+        },
+        lines: {
+          type: "array",
+          description: "Line modifications (at least one when given). Provide line_id to update an existing line, omit it to append a new one. A new line needs account_name or item_name (exclusive) and an amount. A description is at most 4000 characters; newlines are kept.",
+          items: {
+            type: "object",
+            properties: {
+              line_id: {
+                type: "string",
+                description: "ID of the existing line to update or delete (omit for a new line); get_purchase_order lists them",
+              },
+              account_name: {
+                type: "string",
+                description: "Account name or number (auto-resolved to ID)",
+              },
+              amount: {
+                type: "number",
+                description: "Line amount (positive number)",
+              },
+              description: {
+                type: "string",
+                description: "Line description (at most 4000 characters)",
+              },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name, matched exactly: a Parent:Child path (e.g., 'Freight:Shipping'), or a bare name when only one item has it. A partial or ambiguous name is refused. Omit to keep the line's current item; pass \"\" together with account_name to convert the line to an account-based one. Mutually exclusive with account_name on the same change.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (matched as an Id only, never as a name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., 'North', 'Parent:Child'). Existing class is preserved if omitted.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
+              },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). Omit to keep the line's current customer; pass \"\" to clear it.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
+              delete: {
+                type: "boolean",
+                description: "Set true to remove this line (requires line_id)",
+              },
+            },
+          },
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, validate and show preview without saving (default: true)",
+        },
+      },
+      required: ["id"],
+    },
+  },
+  {
     name: "edit_bill",
     annotations: { title: "Edit QuickBooks bill", ...EDIT_LINES },
     description: "Modify an existing bill. Can update vendor, date, due date, payment terms, memo, and/or lines. For lines: provide line_id to update existing line, omit to add new line, set delete=true to remove. A line_id preserves the line's existing customer unless customer_name/customer_id is given; pass customer_name: \"\" to clear it. Note: DepartmentRef is header-level only — lines do not support department.",
@@ -914,6 +1052,119 @@ export const toolDefinitions = [
         },
       },
       required: ["id"],
+    },
+  },
+  {
+    name: "create_purchase_order",
+    annotations: { title: "Create QuickBooks purchase order", ...CREATE },
+    description: "Create a vendor purchase order. Draft by default: the preview shows exactly what would be sent, and nothing is saved until draft=false. " +
+      "Vendor and item names must match exactly (case-insensitive); there is no partial matching, and an item is named by its Parent:Child path, or by item_id. " +
+      "A QuickBooks purchase order carries no due date, so a delivery date belongs in memo, vendor_message or a line description. " +
+      "ship_to keeps at most 5 lines and 2000 characters; a longer address is refused rather than folded. " +
+      "A Ref no. another purchase order already uses is refused. After creating, QuickBooks' booking is compared with what was sent, and any difference is reported as an error (the purchase order still exists).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        vendor_name: {
+          type: "string",
+          description: "Vendor display name, matched exactly (case-insensitive, trimmed); a partial name is refused. Use vendor_id if you know it.",
+        },
+        vendor_id: {
+          type: "string",
+          description: "Vendor ID (matched as an Id only, never as a name)",
+        },
+        txn_date: {
+          type: "string",
+          description: "Purchase order date in YYYY-MM-DD format",
+        },
+        doc_number: {
+          type: "string",
+          description: "Reference number (1-21 characters). Optional: omit it, or pass an empty string, and QuickBooks assigns one. A number another purchase order uses is refused.",
+        },
+        status: {
+          type: "string",
+          enum: ["Open", "Closed"],
+          description: "Purchase order status (default: Open)",
+        },
+        ship_method: {
+          type: "string",
+          description: "Ship via, free text (e.g., 'Truck'). QuickBooks keeps any string.",
+        },
+        ship_to: {
+          anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+          description: "Ship-to address as one string with newlines, or an array of rows. Rows are trimmed and blank rows dropped. At most 5 lines and 2000 characters in total; more is refused, so combine rows yourself. Only the address lines are stored (no city or postal code fields).",
+        },
+        memo: {
+          type: "string",
+          description: "Private memo for the purchase order (not printed for the vendor)",
+        },
+        vendor_message: {
+          type: "string",
+          description: "Message to the vendor, printed on the purchase order (QuickBooks field Memo)",
+        },
+        lines: {
+          type: "array",
+          description: "Array of line items (at least one). Provide account_name OR account_id, or item_name OR item_id to post the line against an Item instead; the two are mutually exclusive. Optionally provide qty and unit_price for an item line, class_name OR class_id for per-line Class tracking, and customer_name OR customer_id to attribute the line to a customer. A description is at most 4000 characters; newlines are kept.",
+          items: {
+            type: "object",
+            properties: {
+              account_name: {
+                type: "string",
+                description: "Account name or number (e.g., 'Supplies', '6000'). Will be looked up to get ID.",
+              },
+              account_id: {
+                type: "string",
+                description: "Account ID (use if you already know it, otherwise use account_name)",
+              },
+              amount: {
+                type: "number",
+                description: "Line amount (positive number)",
+              },
+              description: {
+                type: "string",
+                description: "Line description (optional, at most 4000 characters)",
+              },
+              item_name: {
+                type: "string",
+                description: "Item (product/service) name, matched exactly: a Parent:Child path (e.g., 'Freight:Shipping'), or a bare name when only one item has it. A partial or ambiguous name is refused. Mutually exclusive with account_name/account_id.",
+              },
+              item_id: {
+                type: "string",
+                description: "Item ID (matched as an Id only, never as a name)",
+              },
+              qty: {
+                type: "number",
+                description: "Quantity for an item line (default: 1)",
+              },
+              unit_price: {
+                type: "number",
+                description: "Price per unit for an item line (if omitted, computed from amount / qty)",
+              },
+              class_name: {
+                type: "string",
+                description: "Class name for this line (e.g., 'North', 'Parent:Child'). Will be looked up to get ID.",
+              },
+              class_id: {
+                type: "string",
+                description: "Class ID (use if you already know it, otherwise use class_name)",
+              },
+              customer_name: {
+                type: "string",
+                description: "Customer or project this line is attributed to (auto-resolved to ID). The line is marked NotBillable; this attributes cost, it does not queue it for re-invoicing.",
+              },
+              customer_id: {
+                type: "string",
+                description: "Customer ID (use if you already know it, otherwise use customer_name)",
+              },
+            },
+          },
+        },
+        draft: {
+          type: "boolean",
+          description: "If true, validate and show preview without creating (default: true)",
+        },
+      },
+      required: ["txn_date", "lines"],
     },
   },
   {
@@ -2008,13 +2259,13 @@ export const toolDefinitions = [
   {
     name: "delete_entity",
     annotations: { title: "Delete QuickBooks transaction", ...DELETE },
-    description: "Permanently delete a QuickBooks transaction. Supports journal entries, bills, invoices, deposits, sales receipts, expenses, vendor credits, bill payments, and attachments. Uses a two-step flow: first call previews what will be deleted, second call with confirm=true executes the deletion. Note: Customers cannot be deleted — use edit_customer with active=false to deactivate instead.",
+    description: "Permanently delete a QuickBooks transaction. Supports journal entries, bills, invoices, deposits, sales receipts, expenses, vendor credits, bill payments, purchase orders, and attachments. Uses a two-step flow: first call previews what will be deleted, second call with confirm=true executes the deletion. Note: Customers cannot be deleted — use edit_customer with active=false to deactivate instead.",
     inputSchema: {
       type: "object",
       properties: {
         entity_type: {
           type: "string",
-          enum: ["journal_entry", "bill", "invoice", "deposit", "sales_receipt", "expense", "vendor_credit", "bill_payment", "attachable"],
+          enum: ["journal_entry", "bill", "invoice", "deposit", "sales_receipt", "expense", "vendor_credit", "bill_payment", "purchase_order", "attachable"],
           description: "The type of entity to delete.",
         },
         id: {
