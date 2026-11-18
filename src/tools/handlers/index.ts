@@ -39,4 +39,5 @@ export {
   handleListAttachments,
   handleEditAttachment,
 } from './attachment.js';
+export { handleGetTransactionPdf } from './transaction-pdf.js';
 export { handleAuthenticate } from './authenticate.js';

@@ -177,8 +177,8 @@ column would otherwise have hidden per-department values entirely.
 |------|------|
 | Change query behavior | `src/query/pagination.ts` |
 | Money utilities | `src/utils/money.ts` |
-| API client | `src/client/quickbooks.ts` |
-| Entities node-quickbooks doesn't wrap | `src/client/rest.ts` |
+| API client factory | `src/client/auth.ts` |
+| Entities node-quickbooks doesn't wrap, and binary reads (`qboGetBinary`, PDFs) | `src/client/rest.ts` |
 | Output mode (stdio/http) | `src/utils/output.ts` |
 | Local keyfile lock, atomic write, token freshness | `src/credentials/keyfile.ts` |
 

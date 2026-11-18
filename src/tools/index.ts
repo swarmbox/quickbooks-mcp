@@ -59,12 +59,25 @@ import {
   handleGetAttachment,
   handleListAttachments,
   handleEditAttachment,
+  handleGetTransactionPdf,
   handleAuthenticate,
 } from "./handlers/index.js";
 
 export { toolDefinitions } from "./definitions.js";
 
 type ToolResult = { content: Array<{ type: string; text: string }>; isError?: boolean };
+
+/** A text block, or an embedded resource block (a PDF returned inline over HTTP). */
+export type ToolContent =
+  | { type: "text"; text: string }
+  | {
+      type: "resource";
+      resource: { uri: string; mimeType: string; blob: string; _meta?: Record<string, unknown> };
+    };
+
+/** What a handler that may return a resource block resolves to. */
+export type ToolHandlerResult = { content: ToolContent[]; isError?: boolean };
+
 type ToolHandler = (client: QuickBooks, args: Record<string, unknown>) => Promise<ToolResult>;
 
 // Tool handler registry
@@ -123,6 +136,10 @@ toolHandlers.set("create_attachment_note", (client, args) => handleCreateAttachm
 toolHandlers.set("get_attachment", (client, args) => handleGetAttachment(client, args as Parameters<typeof handleGetAttachment>[1]));
 toolHandlers.set("list_attachments", (client, args) => handleListAttachments(client, args as Parameters<typeof handleListAttachments>[1]));
 toolHandlers.set("edit_attachment", (client, args) => handleEditAttachment(client, args as Parameters<typeof handleEditAttachment>[1]));
+// The one handler that can return a resource block. ToolResult stays text-typed so
+// every other handler and caller is unchanged; the dispatcher and src/server.ts pass
+// the result through untouched, so the resource block reaches the client intact.
+toolHandlers.set("get_transaction_pdf", (client, args) => handleGetTransactionPdf(client, args as Parameters<typeof handleGetTransactionPdf>[1]) as unknown as Promise<ToolResult>);
 
 const schemasByTool = new Map<string, ToolSchema>(
   allToolDefinitions.map((t) => [t.name, t.inputSchema as unknown as ToolSchema])

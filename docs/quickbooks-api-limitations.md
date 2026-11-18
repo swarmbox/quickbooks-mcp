@@ -1212,6 +1212,39 @@ parent rename rewrites every child's path and a deactivation cascades.
   purchase-order mapping, so the purchase-order tools print no "View in
   QuickBooks" link until the route is verified.
 
+## Transaction PDFs
+
+Use the `get_transaction_pdf` tool to fetch a transaction's PDF.
+
+### Verified in a sandbox company (2026-11-18)
+
+- **Route.** `GET /v3/company/{realm}/{entity}/{id}/pdf` with
+  `Accept: application/pdf` returns the QBO-rendered PDF.
+- **Six types render:** PurchaseOrder, Invoice, Estimate, SalesReceipt,
+  CreditMemo and RefundReceipt.
+- **Three types return HTTP 400 with an empty body:** Bill, Purchase and
+  Deposit.
+- **The entity path segment must be lowercase.** `/purchaseorder/{id}/pdf`
+  works; `/PurchaseOrder/{id}/pdf` returns 400.
+- **A Fault comes back as XML on this route, not JSON.** The body is
+  `IntuitResponse/Fault/Error` with a `code`, `Message` and `Detail`; a missing
+  id returns code 610 (Object Not Found).
+- **node-quickbooks has no PurchaseOrder PDF method.** It wraps the PDF read
+  only for Estimate, Invoice, CreditMemo and SalesReceipt, so the server reads
+  the route itself with `qboGetBinary` in `src/client/rest.ts`.
+
+### How get_transaction_pdf uses this
+
+Over HTTP the tool returns the PDF inline as an embedded resource. The size is
+capped at `HTTP_PDF_MAX_BYTES` (4,400,000 bytes) because Lambda's response limit
+is 6 MB and base64 inflates the payload by about a third. The file name travels
+in `_meta.fileName`, because the MCP SDK strips `name` from the resource.
+
+### Unverified
+
+- Payment, VendorCredit, BillPayment and the other transaction types were not
+  probed.
+
 ## References
 
 - [Data Queries - Intuit Developer](https://developer.intuit.com/app/developer/qbo/docs/learn/explore-the-quickbooks-online-api/data-queries)
