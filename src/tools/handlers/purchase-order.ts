@@ -4,8 +4,8 @@
 // stores a PO differently from what a caller would assume, and it drops or
 // re-folds what it does not like without an error. Every behaviour below that
 // looks defensive comes from a sandbox probe (the "Verified QBO facts" table in
-// docs/issues/features/20261118-create-purchase-order.md); each helper cites the
-// fact it enforces. The rule they share: refuse or normalize client-side, so the
+// docs/issues/features/implemented/20261118-create-purchase-order.md); each
+// helper cites the fact it enforces. The rule they share: refuse or normalize client-side, so the
 // preview is what gets stored, then compare the booking with what was sent.
 
 import QuickBooks from "node-quickbooks";
@@ -32,6 +32,9 @@ import {
 import { extractQueryResults } from "../../client/cache.js";
 import {
   formatAddress,
+  normalizeAddressRows,
+  freeFormAddress,
+  addressLinesMatch,
   formatDollars,
   sumCents,
   toCents,
@@ -48,10 +51,6 @@ type Ref = { value: string; name?: string };
 const MAX_DOC_NUMBER = 21;
 /** A line Description over 4000 characters is fault 2050. */
 const MAX_DESCRIPTION = 4000;
-/** ShipAddr has Line1 to Line5; Line6 is fault 2010. */
-const MAX_SHIP_TO_LINES = 5;
-/** The joined ShipAddr lines, separators counted, over 2000 characters are fault 6000. */
-const MAX_SHIP_TO_CHARS = 2000;
 
 const PO_STATUSES = ["Open", "Closed"] as const;
 type PurchaseOrderStatus = (typeof PO_STATUSES)[number];
@@ -83,55 +82,8 @@ export interface PurchaseOrderBody {
   Line?: QboExpenseLine[];
 }
 
+/** The ShipAddr lines the booked comparison reads; ship_to sets nothing else. */
 const SHIP_ADDR_KEYS = ["Line1", "Line2", "Line3", "Line4", "Line5"] as const;
-
-/**
- * Split ship_to into the address rows QBO will keep.
- *
- * Sandbox facts enforced (Verified QBO facts, ShipAddr): QBO splits an embedded
- * newline into the following lines and folds rows 6 and up onto Line5, and it
- * refuses more than 2000 joined characters. So a string is split on \r?\n, and
- * so is each array element (no element can hide a newline for QBO to re-fold),
- * each row is trimmed (indentation means nothing in an address line) and blank
- * rows are dropped. More than 5 rows are refused rather than folded: folding
- * rewrites the caller's layout, and the caller knows which rows belong together.
- * Empty input is no address at all, which is how a create omits ShipAddr and an
- * edit clears it.
- */
-export function normalizeShipTo(input: string | string[] | undefined): { lines: string[] } {
-  const elements = input === undefined ? [] : Array.isArray(input) ? input : [input];
-  const lines = elements
-    .flatMap(element => String(element).split(/\r?\n/))
-    .map(row => row.trim())
-    .filter(row => row !== "");
-
-  if (lines.length > MAX_SHIP_TO_LINES) {
-    throw new Error(
-      [
-        `ship_to has ${lines.length} rows, but QuickBooks keeps ${MAX_SHIP_TO_LINES} address lines:`,
-        ...lines.map((row, i) => `  ${i + 1}. ${row}`),
-        `Combine rows so that at most ${MAX_SHIP_TO_LINES} remain.`,
-      ].join("\n")
-    );
-  }
-
-  const joinedLength = lines.join("\n").length;
-  if (joinedLength > MAX_SHIP_TO_CHARS) {
-    throw new Error(
-      `ship_to is ${joinedLength} characters with one separator between rows, ` +
-      `over QuickBooks' ${MAX_SHIP_TO_CHARS}-character limit. Shorten it.`
-    );
-  }
-
-  return { lines };
-}
-
-/** The ShipAddr a normalized ship_to is sent as: Line1 to LineN only, no City or other key. */
-export function shipAddrFromLines(lines: string[]): QBAddress {
-  const addr: QBAddress = {};
-  lines.forEach((row, i) => { addr[SHIP_ADDR_KEYS[i]] = row; });
-  return addr;
-}
 
 /**
  * Refuse a Ref no. another purchase order already holds.
@@ -235,7 +187,8 @@ function refRow(label: string, sent: Ref | undefined, booked: Ref | undefined) {
  * PostalCode is never a false alarm. For a payload with `Line`, every line is
  * compared by position (DetailType, item or account ref value, Description,
  * Amount, Qty, ClassRef value, CustomerRef value) and the total is the sum of
- * the sent amounts. ShipAddr compares Line1 to Line5 only, and a cleared field
+ * the sent amounts. ShipAddr compares Line1 to Line5 only, with whitespace
+ * collapsed (a "\n" inside Line5 reads back as a space), and a cleared field
  * (`{}` or `{ value: "" }`) matches an absent or empty one. Money compares in
  * cents. The response's extra keys (ShipAddr Id, the ShipMethodRef name,
  * APAccountRef, line Ids) are never read.
@@ -252,8 +205,15 @@ export function poBookedDifferences(sent: PurchaseOrderBody, booked: PurchaseOrd
   scalar("Status", sent.POStatus, booked.POStatus, "POStatus");
   if (sent.ShipMethodRef !== undefined) rows.push(refRow("Ship via", sent.ShipMethodRef, booked.ShipMethodRef));
   if (sent.ShipAddr !== undefined) {
+    // QBO keeps a "\n" inside Line5 but every API read returns those rows joined
+    // with spaces, so a line differs only when more than whitespace differs. A
+    // line that matches is reported as sent on both sides, so it raises nothing;
+    // one that does not match keeps both raw values for the report.
     SHIP_ADDR_KEYS.forEach((key, i) => {
-      rows.push({ label: `Ship to line ${i + 1}`, sent: text(sent.ShipAddr![key]), booked: text(booked.ShipAddr?.[key]) });
+      const sentLine = text(sent.ShipAddr![key]);
+      const bookedLine = text(booked.ShipAddr?.[key]);
+      const same = addressLinesMatch({ [key]: sentLine }, { [key]: bookedLine });
+      rows.push({ label: `Ship to line ${i + 1}`, sent: sentLine, booked: same ? sentLine : bookedLine });
     });
   }
   scalar("Memo", sent.PrivateNote, booked.PrivateNote, "PrivateNote");
@@ -364,7 +324,8 @@ export async function handleCreatePurchaseOrder(
   });
   resolvedLines.forEach((line, i) => assertDescriptionLength(line.description, `Line ${i + 1}`));
 
-  const shipTo = normalizeShipTo(ship_to).lines;
+  const shipTo = normalizeAddressRows(ship_to);
+  const shipAddr = freeFormAddress(shipTo, "ship_to");
 
   // "" means absent (QBO auto-assigns), as on create_bill.
   if (doc_number) {
@@ -380,7 +341,7 @@ export async function handleCreatePurchaseOrder(
     POStatus: status,
     ...(doc_number && { DocNumber: doc_number }),
     ...(ship_method && { ShipMethodRef: { value: ship_method, name: ship_method } }),
-    ...(shipTo.length > 0 && { ShipAddr: shipAddrFromLines(shipTo) }),
+    ...(shipTo.length > 0 && { ShipAddr: shipAddr }),
     ...(memo && { PrivateNote: memo }),
     ...(vendor_message && { Memo: vendor_message }),
     Line: resolvedLines.map(expenseLinePayload),
@@ -570,7 +531,7 @@ export async function handleEditPurchaseOrder(
     );
   }
 
-  const shipTo = ship_to === undefined ? undefined : normalizeShipTo(ship_to).lines;
+  const shipAddr = ship_to === undefined ? undefined : freeFormAddress(normalizeAddressRows(ship_to), "ship_to");
 
   if (doc_number !== undefined) {
     if (doc_number === "") {
@@ -594,7 +555,7 @@ export async function handleEditPurchaseOrder(
     ...(ship_method !== undefined && {
       ShipMethodRef: ship_method === "" ? CLEARED_REF : { value: ship_method, name: ship_method },
     }),
-    ...(shipTo !== undefined && { ShipAddr: shipAddrFromLines(shipTo) }),
+    ...(shipAddr !== undefined && { ShipAddr: shipAddr }),
     ...(memo !== undefined && { PrivateNote: memo }),
     ...(vendor_message !== undefined && { Memo: vendor_message }),
     ...(newLines && { Line: newLines }),

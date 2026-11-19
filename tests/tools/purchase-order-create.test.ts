@@ -13,7 +13,6 @@ import type QuickBooks from "node-quickbooks";
 import { clearLookupCache } from "../../src/client/index.js";
 import {
   handleCreatePurchaseOrder,
-  normalizeShipTo,
   poBookedDifferences,
 } from "../../src/tools/handlers/purchase-order.js";
 import { toolDefinitions } from "../../src/tools/definitions.js";
@@ -338,15 +337,42 @@ describe("create_purchase_order ship_to", () => {
     assert.deepEqual(fake.created[0].ShipAddr, { Line1: "Stop A", Line2: "Stop B" });
   });
 
-  it("po-create-ship-to-six-rows — six rows are refused, listing them, in draft and in commit", async () => {
-    await inDraftAndCommit(async (mode, label) => {
-      const fake = fakeClient();
-      const message = await rejection(() => create(fake.client, { ...FULL_CREATE_ARGS, ship_to: "R1\nR2\nR3\nR4\nR5\nR6", ...mode }));
+  it("po-create-ship-to-seven-rows — seven rows preview on separate lines and commit as Line1-Line4 plus rows 5-7 joined in Line5", async () => {
+    const SEVEN_ROWS = "R1\nR2\nR3\nR4\nR5\nR6\nR7";
 
-      for (const row of ["R1", "R2", "R3", "R4", "R5", "R6"]) assert.ok(message.includes(row), `${label}: ${message}`);
-      assert.match(message, /QuickBooks keeps 5 address lines/, label);
-      assert.equal(fake.wrote(), false, label);
+    const draftFake = fakeClient();
+    const draft = await create(draftFake.client, { ...FULL_CREATE_ARGS, ship_to: SEVEN_ROWS });
+    const rows = rowsOf(draft);
+    const at = rows.indexOf("Ship to:");
+    assert.notEqual(at, -1, textOf(draft));
+    assert.deepEqual(rows.slice(at, at + 8), ["Ship to:", "  R1", "  R2", "  R3", "  R4", "  R5", "  R6", "  R7"]);
+    assert.equal(draftFake.wrote(), false);
+
+    clearLookupCache();
+    const fake = fakeClient();
+    const result = await create(fake.client, { ...FULL_CREATE_ARGS, ship_to: SEVEN_ROWS, draft: false });
+    assert.deepEqual(fake.created[0].ShipAddr, {
+      Line1: "R1",
+      Line2: "R2",
+      Line3: "R3",
+      Line4: "R4",
+      Line5: "R5\nR6\nR7",
     });
+    assert.equal(result.isError, undefined, textOf(result));
+  });
+
+  it("po-create-booked-space-joined — a booking that returns the rows past the fifth joined with spaces is not a difference", async () => {
+    const fake = fakeClient({
+      override: (response) => ({
+        ...response,
+        ShipAddr: { Id: "90", Line1: "R1", Line2: "R2", Line3: "R3", Line4: "R4", Line5: "R5 R6 R7" },
+      }),
+    });
+    const result = await create(fake.client, { ...FULL_CREATE_ARGS, ship_to: "R1\nR2\nR3\nR4\nR5\nR6\nR7", draft: false });
+
+    assert.equal(fake.created.length, 1);
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.ok(!textOf(result).includes("NOT AS PREVIEWED"), textOf(result));
   });
 
   it("po-create-ship-to-length — 2000 joined characters create, 2001 are refused", async () => {
@@ -362,13 +388,6 @@ describe("create_purchase_order ship_to", () => {
     assert.match(message, /2001/);
     assert.match(message, /2000/);
     assert.equal(over.wrote(), false);
-  });
-
-  it("normalizeShipTo returns the rows QuickBooks will keep, and nothing for an empty input", () => {
-    assert.deepEqual(normalizeShipTo("  Stop A \r\n\r\n 100 Main St "), { lines: ["Stop A", "100 Main St"] });
-    assert.deepEqual(normalizeShipTo(undefined), { lines: [] });
-    assert.deepEqual(normalizeShipTo(""), { lines: [] });
-    assert.deepEqual(normalizeShipTo([]), { lines: [] });
   });
 });
 
@@ -433,7 +452,7 @@ describe("create_purchase_order refusals before any write", () => {
     const everythingWrong = {
       ...FULL_CREATE_ARGS,
       vendor_name: "North",
-      ship_to: "R1\nR2\nR3\nR4\nR5\nR6",
+      ship_to: ["a".repeat(1000), "b".repeat(1000)],
       doc_number: "N".repeat(22),
     };
 
@@ -441,7 +460,7 @@ describe("create_purchase_order refusals before any write", () => {
     assert.match(await rejection(() => create(fake.client, everythingWrong)), /no vendor matches/i);
     assert.match(
       await rejection(() => create(fake.client, { ...everythingWrong, vendor_name: "North Freight" })),
-      /5 address lines/
+      /ship_to is 2001 characters/
     );
     assert.match(
       await rejection(() => create(fake.client, { ...everythingWrong, vendor_name: "North Freight", ship_to: "Stop A" })),
@@ -568,6 +587,23 @@ describe("poBookedDifferences", () => {
     assert.deepEqual(poBookedDifferences(sent, response), []);
   });
 
+  it("tolerates whitespace in a ship-to row but still reports a row that was dropped, changed or added", () => {
+    const sent = sentPayload();
+    sent.ShipAddr = { Line1: "R1", Line2: "R2", Line3: "R3", Line4: "R4", Line5: "R5\nR6\nR7" };
+    const response = (shipAddr: Body): Body => ({ ...defaultCreateResponse(sent), ShipAddr: { Id: "90", ...shipAddr } });
+    const rows = { Line1: "R1", Line2: "R2", Line3: "R3", Line4: "R4" };
+
+    assert.deepEqual(poBookedDifferences(sent, response({ ...rows, Line5: "R5 R6 R7" })), []);
+    assert.deepEqual(poBookedDifferences(sent, response({ ...rows, Line5: "R5\r\nR6\r\nR7" })), []);
+
+    const dropped = poBookedDifferences(sent, response({ ...rows, Line5: "R5 R6" }));
+    assert.ok(dropped.some((d) => /Ship to line 5: sent R5\s+R6\s+R7, booked R5 R6/.test(d)), JSON.stringify(dropped));
+    const changed = poBookedDifferences(sent, response({ ...rows, Line5: "R5 R6 R8" }));
+    assert.ok(changed.some((d) => /Ship to line 5/.test(d)), JSON.stringify(changed));
+    const added = poBookedDifferences(sent, response({ ...rows, Line5: "R5 R6 R7 R8" }));
+    assert.ok(added.some((d) => /Ship to line 5/.test(d)), JSON.stringify(added));
+  });
+
   it("never compares keys the payload did not send", () => {
     const response = booked();
     response.ShipAddr = { Id: "90", Line1: "Stop A", Line2: "100 Main St", City: "Northtown", PostalCode: "11111" };
@@ -604,7 +640,7 @@ describe("create_purchase_order schema", () => {
     });
   });
 
-  it("the description says there is no due date, the ship_to limits, exact names and the draft default", () => {
+  it("the description says there is no due date, the ship_to limit, exact names and the draft default", () => {
     const definition = toolDefinitions.find((t) => t.name === "create_purchase_order");
     assert.ok(definition);
     const text = JSON.stringify(definition);
@@ -612,10 +648,35 @@ describe("create_purchase_order schema", () => {
     assert.match(text, /no due date/i);
     assert.match(text, /memo/);
     assert.match(text, /vendor_message/);
-    assert.match(text, /5 lines/);
+    assert.doesNotMatch(text, /5 lines/);
     assert.match(text, /2000 characters/);
     assert.match(text, /Parent:Child/);
     assert.match(text, /exactly/i);
     assert.match(text, /draft/i);
+  });
+
+  it("po-tool-text-ship-to — create, edit and get describe rows past the fifth and their read-back, and never tell the caller to combine rows", () => {
+    const textOf = (name: string): string => {
+      const definition = toolDefinitions.find((t) => t.name === name);
+      assert.ok(definition, `${name} is defined`);
+      return JSON.stringify(definition);
+    };
+
+    for (const name of ["create_purchase_order", "edit_purchase_order", "get_purchase_order"]) {
+      const text = textOf(name);
+      assert.doesNotMatch(text, /5 lines|five lines/i, name);
+      assert.doesNotMatch(text, /combine/i, name);
+      assert.match(text, /joined with spaces/, `${name} says the read-back is space-joined`);
+    }
+    for (const name of ["create_purchase_order", "edit_purchase_order"]) {
+      const text = textOf(name);
+      assert.match(text, /2000 characters/, name);
+      assert.match(text, /fifth/, name);
+      assert.match(text, /separate lines/, name);
+    }
+
+    const edit = textOf("edit_purchase_order");
+    assert.match(edit, /without ship_to/);
+    assert.match(edit, /untouched/);
   });
 });

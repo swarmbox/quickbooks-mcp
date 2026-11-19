@@ -236,6 +236,37 @@ describe("edit_purchase_order payload", () => {
     assert.equal(result.isError, undefined, textOf(result));
   });
 
+  it("po-edit-ship-to-seven-rows — seven rows are sent as Line1-Line4 plus rows 5-7 joined in Line5, and a space-joined booking is no difference", async () => {
+    const SEVEN_ROWS = ["R1", "R2", "R3", "R4", "R5", "R6", "R7"];
+
+    const draftFake = fakeClient();
+    const draft = await edit(draftFake.client, { id: "600", ship_to: SEVEN_ROWS });
+    const rows = rowsOf(draft);
+    const at = rows.indexOf("Ship to (after):");
+    assert.notEqual(at, -1, textOf(draft));
+    assert.deepEqual(rows.slice(at, at + 8), ["Ship to (after):", "  R1", "  R2", "  R3", "  R4", "  R5", "  R6", "  R7"]);
+    assert.equal(draftFake.wrote(), false);
+
+    clearLookupCache();
+    const fake = fakeClient({
+      override: (response) => ({
+        ...response,
+        ShipAddr: { Id: "90", Line1: "R1", Line2: "R2", Line3: "R3", Line4: "R4", Line5: "R5 R6 R7" },
+      }),
+    });
+    const result = await edit(fake.client, { id: "600", ship_to: SEVEN_ROWS, draft: false });
+
+    assert.deepEqual(fake.updated[0].ShipAddr, {
+      Line1: "R1",
+      Line2: "R2",
+      Line3: "R3",
+      Line4: "R4",
+      Line5: "R5\nR6\nR7",
+    });
+    assert.equal(result.isError, undefined, textOf(result));
+    assert.ok(!textOf(result).includes("NOT AS PREVIEWED"), textOf(result));
+  });
+
   it("po-edit-clears — an empty ship_to and an empty ship_method clear, and the booked absence is not a mismatch", async () => {
     for (const ship_to of ["", []]) {
       clearLookupCache();
@@ -336,11 +367,14 @@ describe("edit_purchase_order refusals before any write", () => {
     assert.equal(fake.wrote(), false);
   });
 
-  it("a ship_to of six rows is refused, listing them", async () => {
+  it("a ship_to over 2000 joined characters is refused, naming the field, with no write", async () => {
     const fake = fakeClient();
-    const message = await rejection(() => edit(fake.client, { id: "600", ship_to: "R1\nR2\nR3\nR4\nR5\nR6", draft: false }));
+    const message = await rejection(() =>
+      edit(fake.client, { id: "600", ship_to: ["a".repeat(1000), "b".repeat(1000)], draft: false })
+    );
 
-    assert.match(message, /QuickBooks keeps 5 address lines/);
+    assert.match(message, /ship_to is 2001 characters/);
+    assert.match(message, /2000/);
     assert.equal(fake.wrote(), false);
   });
 
@@ -513,6 +547,7 @@ describe("edit_purchase_order schema", () => {
     const text = JSON.stringify(definition());
 
     assert.match(text, /replaces the whole address/);
+    assert.doesNotMatch(text, /5 lines/);
     assert.match(text, /empty string clears|"" clears|pass \\"\\" to clear/i);
     assert.match(text, /exactly/i);
     assert.match(text, /no due date/i);

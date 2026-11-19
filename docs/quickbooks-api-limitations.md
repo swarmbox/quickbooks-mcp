@@ -1146,6 +1146,43 @@ parent rename rewrites every child's path and a deactivation cascades.
   turned on was probed; other regions may allow different lengths or
   characters.
 
+## Addresses
+
+### Verified in a sandbox company (2026-11-18)
+
+Verified on a purchase order's ship-to (through both the QuickBooks screen and
+the API) and on vendor and customer addresses.
+
+- **Every QuickBooks address has `Line1`-`Line5`.** `Line6` is refused (fault
+  2010).
+- **A line break is stored and shown, but the API cannot read it back.** A line
+  break inside `Line5` (`\n` or `\r\n`), or rows past the fifth sent
+  newline-separated in `Line1`, is stored, and the QuickBooks screen shows each
+  row on its own line. Every v3 API read (the create or update response, a GET,
+  a query) returns those rows in `Line5` joined with single spaces, byte for
+  byte the same as a write that joined them with spaces. The API cannot tell
+  the two apart.
+- **A sparse update that omits the address keeps the line breaks.** Re-sending
+  a read-back `Line5` flattens them to spaces.
+- **The joined text is limited to 2000 characters** (rows joined with one `\n`
+  each); more is refused with fault 6000.
+
+### The rule for the tools
+
+- Where the QuickBooks screen has a **structured address** (street lines plus
+  City, State, ZIP, Country, as on customers and vendors), send structured
+  fields with `buildQBAddress`.
+- Where the screen has a **free-form ship-to text box** (a purchase order's
+  shipping address, `ship_to`), use `normalizeAddressRows` and `freeFormAddress`
+  in `src/utils/address.ts`. `addressLinesMatch` compares what was sent with
+  what QuickBooks returns, so a read-back that joined rows with spaces is not
+  reported as a difference.
+
+### Unverified
+
+- **Invoice, estimate and sales-receipt addresses** were not probed; assume
+  nothing about them until they are.
+
 ## Purchase Orders
 
 ### Verified in a sandbox company (2026-11-18)
@@ -1154,11 +1191,10 @@ parent rename rewrites every child's path and a deactivation cascades.
   on create and update. `ShipDate` is refused (2010).
 - **`ShipMethodRef` is a free string.** `{value: "X"}` is stored as
   `{value: "X", name: "X"}`; there is no list, and `{value: ""}` clears it.
-- **`ShipAddr` holds `Line1`-`Line5`.** `Line6` is refused (2010). An embedded
-  newline is split across the following lines, and rows past the fifth are
-  folded onto `Line5` with spaces. The joined lines must be 2000 characters or
-  fewer (fault 6000), and `City` 255 or fewer. A sparse update replaces the
-  whole `ShipAddr`, and `{}` clears it.
+- **`ShipAddr` holds `Line1`-`Line5`.** `Line6` is refused (2010), and `City`
+  is 255 characters or fewer. A sparse update that sends `ShipAddr` replaces the
+  whole address, and `{}` clears it. How rows past the fifth, line breaks and
+  the 2000-character limit behave is in [Addresses](#addresses).
 - **A duplicate `DocNumber` is accepted** when custom transaction numbers are
   off. The length limit is 21 characters (22 gives 2050).
 - **Line `Description` is 4000 characters or fewer** (4001 gives 2050); newlines
@@ -1183,10 +1219,10 @@ parent rename rewrites every child's path and a deactivation cascades.
 
 - `due_date`, `sales_term_ref` and `department_name` are not offered; the
   validator refuses them as unknown keys.
-- `ship_to` is normalized client-side (split on newlines, trimmed, blank rows
-  dropped) and refused over 5 lines or 2000 characters, rather than letting
-  QuickBooks re-fold it. On edit it is a whole replacement; `""` or `[]` clears
-  it.
+- `ship_to` is a free-form ship-to text box, so it goes through
+  `normalizeAddressRows` and `freeFormAddress` (see [Addresses](#addresses)): any
+  number of rows, refused only over 2000 characters joined. On edit it is a
+  whole replacement; `""` or `[]` clears it.
 - A `doc_number` another purchase order already uses is refused with a query, in
   draft and on commit; length and description limits are checked client-side.
 - `edit_purchase_order` sends only the changed fields, and refuses an edit that

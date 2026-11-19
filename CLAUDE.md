@@ -225,4 +225,9 @@ Both builds must pass before committing. After changes, restart Claude Code to r
 - node-quickbooks only wraps ~35 entities; use `src/client/rest.ts` for the rest
 - Some postings have no account reference in the payload (A/R, sales tax) and are
   invisible to entity-based reads — see `docs/entity-coverage.md`
+- Addresses: keep a structured address (customers, vendors) structured via
+  `buildQBAddress`; send free-form ship-to text (a PO's `ship_to`) through the
+  `src/utils/address.ts` helpers. QBO stores a line break in `Line5` but reads
+  it back as a space, so the API cannot tell them apart. See
+  [docs/quickbooks-api-limitations.md#addresses](docs/quickbooks-api-limitations.md#addresses)
 - See `docs/quickbooks-api-limitations.md` for details
